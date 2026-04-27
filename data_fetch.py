@@ -3,18 +3,12 @@ from typing import Optional
 
 import pandas as pd
 import requests
+import streamlit as st
 import yfinance as yf
 
 import config
 
 CACHE_TTL = 3600
-
-try:
-    import streamlit as st
-    cache = st.cache_data(ttl=CACHE_TTL)
-except Exception:
-    def cache(func):
-        return func
 
 
 CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
@@ -30,9 +24,12 @@ CNN_HEADERS = {
 FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 
-@cache
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_index_history(ticker: str, period: str = "2y") -> pd.DataFrame:
-    df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+    try:
+        df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+    except Exception:
+        return pd.DataFrame()
     if df.empty:
         return df
     df = df[["Close"]].copy()
@@ -40,9 +37,12 @@ def fetch_index_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     return df
 
 
-@cache
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_latest_price(ticker: str) -> Optional[dict]:
-    df = yf.Ticker(ticker).history(period="5d", auto_adjust=False)
+    try:
+        df = yf.Ticker(ticker).history(period="5d", auto_adjust=False)
+    except Exception:
+        return None
     if df.empty or len(df) < 2:
         return None
     last = df["Close"].iloc[-1]
@@ -55,7 +55,7 @@ def fetch_latest_price(ticker: str) -> Optional[dict]:
     }
 
 
-@cache
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_fear_greed() -> Optional[dict]:
     try:
         r = requests.get(CNN_URL, headers=CNN_HEADERS, timeout=15)
@@ -75,7 +75,7 @@ def fetch_fear_greed() -> Optional[dict]:
     }
 
 
-@cache
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_fred_series(series_id: str, api_key: str, days: int = 60) -> pd.DataFrame:
     if not api_key:
         return pd.DataFrame()
@@ -86,9 +86,12 @@ def fetch_fred_series(series_id: str, api_key: str, days: int = 60) -> pd.DataFr
         "sort_order": "desc",
         "limit": days,
     }
-    r = requests.get(FRED_URL, params=params, timeout=15)
-    r.raise_for_status()
-    obs = r.json().get("observations", [])
+    try:
+        r = requests.get(FRED_URL, params=params, timeout=15)
+        r.raise_for_status()
+        obs = r.json().get("observations", [])
+    except Exception:
+        return pd.DataFrame()
     if not obs:
         return pd.DataFrame()
     df = pd.DataFrame(obs)
