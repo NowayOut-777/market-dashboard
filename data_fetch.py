@@ -95,7 +95,8 @@ def fetch_fear_greed() -> Optional[dict]:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_fred_series(series_id: str, api_key: str, days: int = 60) -> pd.DataFrame:
+def fetch_fred_series(series_id: str, api_key: str, days: int = 120) -> pd.DataFrame:
+    import time
     if not api_key:
         return pd.DataFrame()
     params = {
@@ -105,12 +106,19 @@ def fetch_fred_series(series_id: str, api_key: str, days: int = 60) -> pd.DataFr
         "sort_order": "desc",
         "limit": days,
     }
-    try:
-        r = requests.get(FRED_URL, params=params, timeout=15)
-        r.raise_for_status()
-        obs = r.json().get("observations", [])
-    except Exception:
-        return pd.DataFrame()
+    obs = []
+    for attempt in range(3):
+        try:
+            r = requests.get(FRED_URL, params=params, timeout=15)
+            r.raise_for_status()
+            obs = r.json().get("observations", [])
+            if obs:
+                break
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(0.5 * (attempt + 1))
+
     if not obs:
         return pd.DataFrame()
     df = pd.DataFrame(obs)

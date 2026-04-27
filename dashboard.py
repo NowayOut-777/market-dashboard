@@ -538,6 +538,9 @@ hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
 
 cols = st.columns(6)
 
+def fred_caption(api_key: str) -> str:
+    return "FRED API 키를 확인해 주세요" if not api_key else "FRED 응답 일시 지연 — 잠시 후 새로고침"
+
 with cols[0]:
     if not yield_df.empty:
         latest_y = float(yield_df["value"].iloc[-1])
@@ -546,7 +549,7 @@ with cols[0]:
         st.caption(f"기준일: {yield_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
     else:
         st.metric("10Y 금리", "데이터 없음")
-        st.caption("FRED API 키를 확인해 주세요")
+        st.caption(fred_caption(fred_key))
 
 with cols[1]:
     if not hy_df.empty:
@@ -556,7 +559,7 @@ with cols[1]:
         st.caption(f"기준일: {hy_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
     else:
         st.metric("HY 스프레드", "데이터 없음")
-        st.caption("FRED API 키를 확인해 주세요")
+        st.caption(fred_caption(fred_key))
 
 remaining = list(config.COMMODITIES_FX.items())
 for i, (name, ticker) in enumerate(remaining):
