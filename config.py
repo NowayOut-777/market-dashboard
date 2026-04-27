@@ -11,6 +11,7 @@ COMMODITIES_FX = {
     "Brent": "BZ=F",
     "Gold (선물)": "GC=F",
     "Silver (선물)": "SI=F",
+    "달러 인덱스 (DXY)": "DX-Y.NYB",
 }
 
 VOLATILITY_INDICES = {

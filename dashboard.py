@@ -536,7 +536,7 @@ fred_key = config.get_fred_api_key()
 yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
 hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
 
-cols = st.columns(6)
+cols = st.columns(7)
 
 def fred_caption(api_key: str) -> str:
     return "FRED API 키를 확인해 주세요" if not api_key else "FRED 응답 일시 지연 — 잠시 후 새로고침"
