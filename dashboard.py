@@ -143,6 +143,19 @@ def render_theme_css():
             color: var(--ink-3) !important;
         }
 
+        .stMarkdown code, .stMarkdown p code, .stMarkdown li code,
+        [data-testid="stMarkdownContainer"] code {
+            background: var(--brand-50) !important;
+            color: var(--brand-500) !important;
+            border: none !important;
+            border-radius: 6px !important;
+            padding: 2px 8px !important;
+            font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+            font-size: 0.95em !important;
+            font-weight: 600 !important;
+            font-variant-numeric: tabular-nums;
+        }
+
         .stButton > button {
             background: var(--brand-500);
             color: #ffffff !important;
