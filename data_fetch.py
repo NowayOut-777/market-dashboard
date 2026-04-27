@@ -24,12 +24,32 @@ CNN_HEADERS = {
 FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 
+FALLBACK_TICKERS = {
+    "^GSPC": "SPY",
+    "^NDX": "QQQ",
+    "^DJI": "DIA",
+}
+
+
+def _fetch_history_with_retry(ticker: str, period: str, retries: int = 3) -> pd.DataFrame:
+    import time
+    for i in range(retries):
+        try:
+            df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+        if i < retries - 1:
+            time.sleep(0.4 * (i + 1))
+    return pd.DataFrame()
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_index_history(ticker: str, period: str = "2y") -> pd.DataFrame:
-    try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
-    except Exception:
-        return pd.DataFrame()
+    df = _fetch_history_with_retry(ticker, period)
+    if df.empty and ticker in FALLBACK_TICKERS:
+        df = _fetch_history_with_retry(FALLBACK_TICKERS[ticker], period)
     if df.empty:
         return df
     df = df[["Close"]].copy()
@@ -39,10 +59,9 @@ def fetch_index_history(ticker: str, period: str = "2y") -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_latest_price(ticker: str) -> Optional[dict]:
-    try:
-        df = yf.Ticker(ticker).history(period="5d", auto_adjust=False)
-    except Exception:
-        return None
+    df = _fetch_history_with_retry(ticker, "5d")
+    if (df.empty or len(df) < 2) and ticker in FALLBACK_TICKERS:
+        df = _fetch_history_with_retry(FALLBACK_TICKERS[ticker], "5d")
     if df.empty or len(df) < 2:
         return None
     last = df["Close"].iloc[-1]
