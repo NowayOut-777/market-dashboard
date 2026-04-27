@@ -1,10 +1,9 @@
+import sys
+import traceback
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
-import config
-import data_fetch as dfetch
-import risk_interpreter as risk
 
 st.set_page_config(
     page_title="시장 대시보드",
@@ -12,9 +11,27 @@ st.set_page_config(
     layout="wide",
 )
 
+try:
+    import config
+    import data_fetch as dfetch
+    import risk_interpreter as risk
+except Exception as _e:
+    st.error("⚠️ 모듈 import 실패")
+    st.code(traceback.format_exc())
+    st.stop()
+
 
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
+
+
+def _safe_section(label: str, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception:
+        st.error(f"⚠️ '{label}' 섹션 렌더링 중 오류")
+        st.code(traceback.format_exc())
+        return None
 
 
 LIGHT_VARS = """
@@ -221,7 +238,11 @@ def render_theme_css():
     st.markdown(css, unsafe_allow_html=True)
 
 
-render_theme_css()
+try:
+    render_theme_css()
+except Exception:
+    st.error("⚠️ 테마 CSS 렌더링 실패")
+    st.code(traceback.format_exc())
 
 
 def section_title(num: int, title: str):
@@ -277,7 +298,12 @@ def password_gate() -> bool:
     return False
 
 
-if not password_gate():
+try:
+    if not password_gate():
+        st.stop()
+except Exception:
+    st.error("⚠️ 비밀번호 게이트 오류")
+    st.code(traceback.format_exc())
     st.stop()
 
 
