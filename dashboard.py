@@ -1,4 +1,5 @@
-import sys
+import hmac
+import time
 import traceback
 
 import pandas as pd
@@ -11,13 +12,19 @@ st.set_page_config(
     layout="wide",
 )
 
+
+def _log_error(label: str) -> None:
+    # 트레이스백은 서버 로그(Manage app → Logs)에만 남기고 화면에는 노출하지 않는다.
+    print(f"[dashboard] {label}:\n{traceback.format_exc()}", flush=True)
+
+
 try:
     import config
     import data_fetch as dfetch
     import risk_interpreter as risk
-except Exception as _e:
-    st.error("⚠️ 모듈 import 실패")
-    st.code(traceback.format_exc())
+except Exception:
+    _log_error("모듈 import 실패")
+    st.error("⚠️ 앱 초기화 중 오류가 발생했습니다. 잠시 후 새로고침해 주세요.")
     st.stop()
 
 
@@ -25,13 +32,33 @@ if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
 
 
+def _is_streamlit_control_flow(e: BaseException) -> bool:
+    # st.rerun()/st.stop()은 streamlit 내부 예외로 동작한다 — 삼키면 안 된다.
+    return type(e).__name__ in ("RerunException", "StopException")
+
+
 def _safe_section(label: str, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
-    except Exception:
-        st.error(f"⚠️ '{label}' 섹션 렌더링 중 오류")
-        st.code(traceback.format_exc())
+    except Exception as e:
+        if _is_streamlit_control_flow(e):
+            raise
+        _log_error(f"'{label}' 섹션 오류")
+        st.error(f"⚠️ '{label}' 섹션을 불러오지 못했습니다. 잠시 후 새로고침해 주세요.")
         return None
+
+
+PLOT_CONFIG = {"displayModeBar": False}
+
+RATING_KOR = {
+    "extreme fear": "극단적 공포",
+    "fear": "공포",
+    "neutral": "중립",
+    "greed": "탐욕",
+    "extreme greed": "극단적 탐욕",
+}
+
+LEVEL_LABEL_KOR = {"safe": "안정", "warning": "경계", "danger": "위험"}
 
 
 LIGHT_VARS = """
@@ -82,9 +109,27 @@ DARK_VARS = """
     --line-muted: #6b7280;
 """
 
+DARK_EXTRA_CSS = """
+[data-testid="stAlert"] {
+    background: var(--surface-2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px;
+}
+[data-testid="stAlert"] p, [data-testid="stAlert"] div, [data-testid="stAlert"] span {
+    color: var(--ink-1) !important;
+}
+[data-testid="stHeader"] svg, [data-testid="stToolbar"] svg,
+[data-testid="stHeader"] button, [data-testid="stToolbar"] button {
+    color: var(--ink-3) !important;
+    fill: var(--ink-3) !important;
+}
+"""
+
 
 def render_theme_css():
-    vars_block = DARK_VARS if st.session_state.dark_mode else LIGHT_VARS
+    is_dark = st.session_state.dark_mode
+    vars_block = DARK_VARS if is_dark else LIGHT_VARS
+    extra = DARK_EXTRA_CSS if is_dark else ""
     css = (
         "<style>"
         "@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');"
@@ -125,6 +170,7 @@ def render_theme_css():
         }
         [data-testid="stMetricValue"] {
             font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+            font-size: 1.4rem !important;
             font-variant-numeric: tabular-nums;
             color: var(--ink-1) !important;
             font-weight: 600 !important;
@@ -206,6 +252,7 @@ def render_theme_css():
             padding: 4px;
             gap: 4px !important;
             border: 1px solid var(--border);
+            flex-wrap: wrap !important;
         }
         [data-baseweb="tab"] {
             background: transparent !important;
@@ -245,8 +292,9 @@ def render_theme_css():
         }
         .kbh-section-title h2 { margin: 0 !important; }
         .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-        </style>
         """
+        + extra +
+        "</style>"
     )
     st.markdown(css, unsafe_allow_html=True)
 
@@ -254,8 +302,7 @@ def render_theme_css():
 try:
     render_theme_css()
 except Exception:
-    st.error("⚠️ 테마 CSS 렌더링 실패")
-    st.code(traceback.format_exc())
+    _log_error("테마 CSS 렌더링 실패")
 
 
 def section_title(num: int, title: str):
@@ -295,18 +342,26 @@ def muted_color() -> str:
     return "#6b7280" if st.session_state.dark_mode else "#9aa0ad"
 
 
+MAX_PW_ATTEMPTS = 5
+
+
 def password_gate() -> bool:
     pw = config.get_app_password()
     if not pw:
         return True
     if st.session_state.get("auth_ok"):
         return True
+    fails = st.session_state.get("auth_fails", 0)
+    if fails >= MAX_PW_ATTEMPTS:
+        st.error("비밀번호 시도 횟수를 초과했습니다. 브라우저 탭을 새로 열어 다시 시도해 주세요.")
+        return False
     entered = st.text_input("🔒 비밀번호", type="password")
     if entered:
-        if entered == pw:
+        if hmac.compare_digest(entered, pw):
             st.session_state.auth_ok = True
             st.rerun()
         else:
+            st.session_state.auth_fails = fails + 1
             st.error("비밀번호가 일치하지 않습니다.")
     return False
 
@@ -314,20 +369,35 @@ def password_gate() -> bool:
 try:
     if not password_gate():
         st.stop()
-except Exception:
-    st.error("⚠️ 비밀번호 게이트 오류")
-    st.code(traceback.format_exc())
+except Exception as _e:
+    if _is_streamlit_control_flow(_e):
+        raise
+    _log_error("비밀번호 게이트 오류")
+    st.error("⚠️ 인증 처리 중 오류가 발생했습니다. 잠시 후 새로고침해 주세요.")
     st.stop()
+
+
+def fallback_caption(df_or_info, original_ticker: str):
+    """지수 조회 실패로 ETF 대체 데이터가 표시될 때 이를 알린다."""
+    if isinstance(df_or_info, pd.DataFrame):
+        source = df_or_info.attrs.get("source_ticker", original_ticker)
+    elif isinstance(df_or_info, dict):
+        source = df_or_info.get("source_ticker", original_ticker)
+    else:
+        return
+    if source != original_ticker:
+        st.caption(f"⚠️ 지수 조회 실패 — {source}(추종 ETF) 가격으로 대체 표시 중")
 
 
 def index_card(name: str, ticker: str):
     df = dfetch.fetch_index_history(ticker)
-    if df.empty or df["Close"].dropna().empty:
+    closes = df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
+    if closes.empty:
         st.warning(f"{name}: 데이터 없음")
         return
 
-    last_close = float(df["Close"].iloc[-1])
-    prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else last_close
+    last_close = float(closes.iloc[-1])
+    prev_close = float(closes.iloc[-2]) if len(closes) >= 2 else last_close
     change_pct = (last_close / prev_close - 1) * 100
 
     ma200 = df["MA200"].dropna()
@@ -339,6 +409,8 @@ def index_card(name: str, ticker: str):
         value=f"{last_close:,.2f}",
         delta=f"{change_pct:+.2f}%",
     )
+    st.caption(f"기준일: {closes.index[-1].strftime('%Y-%m-%d')}")
+    fallback_caption(df, ticker)
     if vs_ma_pct is not None:
         color = "🟢" if vs_ma_pct >= 0 else "🔴"
         st.caption(f"{color} 200일선 대비 {vs_ma_pct:+.2f}% (MA200: {ma_value:,.2f})")
@@ -362,17 +434,11 @@ def index_card(name: str, ticker: str):
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=grid_color()),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
 
 
 def fear_greed_gauge(score: float, rating: str):
-    rating_kor = {
-        "extreme fear": "극단적 공포",
-        "fear": "공포",
-        "neutral": "중립",
-        "greed": "탐욕",
-        "extreme greed": "극단적 탐욕",
-    }.get(rating.lower(), rating)
+    rating_kor = RATING_KOR.get((rating or "unknown").lower(), rating or "unknown")
 
     is_dark = st.session_state.dark_mode
     title_color = "#cdd2dc" if is_dark else "#2b3140"
@@ -404,17 +470,19 @@ def fear_greed_gauge(score: float, rating: str):
 
 def vol_card(name: str, ticker: str, levels: dict, interpret_fn):
     df = dfetch.fetch_index_history(ticker, period="1y")
-    if df.empty:
+    closes = df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
+    if closes.empty:
         st.warning(f"{name}: 데이터 없음")
         return
-    last = float(df["Close"].iloc[-1])
-    prev = float(df["Close"].iloc[-2]) if len(df) >= 2 else last
+    last = float(closes.iloc[-1])
+    prev = float(closes.iloc[-2]) if len(closes) >= 2 else last
     sig = interpret_fn(last)
 
     st.metric(
         label=f"{sig.icon} {name}",
         value=f"{last:.2f}",
         delta=f"{(last - prev):+.2f}",
+        delta_color="inverse",
     )
     st.caption(sig.headline)
 
@@ -429,7 +497,7 @@ def vol_card(name: str, ticker: str, levels: dict, interpret_fn):
         fig.add_hline(
             y=level_val, line_dash="dot", line_width=1,
             line_color=threshold_colors.get(level_name, muted_color()),
-            annotation_text=f"{level_name} {level_val:.0f}",
+            annotation_text=f"{LEVEL_LABEL_KOR.get(level_name, level_name)} {level_val:.0f}",
             annotation_position="right",
             opacity=0.55,
         )
@@ -440,7 +508,7 @@ def vol_card(name: str, ticker: str, levels: dict, interpret_fn):
         xaxis=dict(showgrid=False),
         yaxis=dict(showgrid=True, gridcolor=grid_color()),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
 
 
 def commodity_metric(name: str, ticker: str):
@@ -456,136 +524,162 @@ def commodity_metric(name: str, ticker: str):
     st.caption(f"기준일: {info['as_of']}")
 
 
+def fred_caption(api_key: str) -> str:
+    return "FRED API 키를 확인해 주세요" if not api_key else "FRED 응답 일시 지연 — 잠시 후 새로고침"
+
+
 # =========================
 # Header
 # =========================
-st.title("미국 시장 대시보드")
-hcol1, hcol2, hcol3 = st.columns([4, 1.2, 1])
-with hcol1:
-    st.caption(f"마지막 갱신: {dfetch.now_kst_str()}  •  데이터 캐시 1시간")
-with hcol2:
-    new_dark = st.toggle(
-        "🌙 다크 모드",
-        value=st.session_state.dark_mode,
-        key="dark_toggle",
-    )
-    if new_dark != st.session_state.dark_mode:
-        st.session_state.dark_mode = new_dark
-        st.rerun()
-with hcol3:
-    if st.button("🔄 새로고침"):
-        st.cache_data.clear()
-        st.rerun()
+REFRESH_COOLDOWN = 120
 
-st.divider()
+
+def render_header():
+    st.title("미국 시장 대시보드")
+    hcol1, hcol2, hcol3 = st.columns([4, 1.2, 1])
+    with hcol1:
+        st.caption(f"마지막 갱신: {dfetch.now_kst_str()}  •  데이터 캐시 1시간")
+    with hcol2:
+        new_dark = st.toggle(
+            "🌙 다크 모드",
+            value=st.session_state.dark_mode,
+            key="dark_toggle",
+        )
+        if new_dark != st.session_state.dark_mode:
+            st.session_state.dark_mode = new_dark
+            st.rerun()
+    with hcol3:
+        if st.button("🔄 새로고침"):
+            now = time.time()
+            if now - st.session_state.get("last_refresh_ts", 0) < REFRESH_COOLDOWN:
+                st.toast("방금 갱신했습니다 — 2분 후 다시 시도해 주세요.")
+            else:
+                st.session_state.last_refresh_ts = now
+                st.cache_data.clear()
+                st.rerun()
+
 
 # =========================
 # 1. Indices vs 200MA
 # =========================
-section_title(1, "미국 3대 지수 — 전일 종가 & 200일 이동평균")
-cols = st.columns(3)
-for col, (name, ticker) in zip(cols, config.INDICES.items()):
-    with col:
-        index_card(name, ticker)
+def render_section_indices():
+    section_title(1, "미국 3대 지수 — 최근 종가 & 200일 이동평균")
+    cols = st.columns(3)
+    for col, (name, ticker) in zip(cols, config.INDICES.items()):
+        with col:
+            index_card(name, ticker)
 
-st.divider()
 
 # =========================
 # 2. Fear & Greed
 # =========================
-section_title(2, "CNN 공포탐욕지수")
-fg = dfetch.fetch_fear_greed()
-if fg and "error" not in fg:
-    cga, cgb = st.columns([1, 1])
-    with cga:
-        st.plotly_chart(fear_greed_gauge(fg["score"], fg["rating"]), use_container_width=True)
-    with cgb:
-        st.markdown(f"**현재**: `{fg['score']:.1f}` ({fg['rating']})")
-        if fg.get("previous_close") is not None:
-            st.markdown(f"- 전일: `{float(fg['previous_close']):.1f}`")
-        if fg.get("previous_1_week") is not None:
-            st.markdown(f"- 1주 전: `{float(fg['previous_1_week']):.1f}`")
-        if fg.get("previous_1_month") is not None:
-            st.markdown(f"- 1개월 전: `{float(fg['previous_1_month']):.1f}`")
-        if fg.get("previous_1_year") is not None:
-            st.markdown(f"- 1년 전: `{float(fg['previous_1_year']):.1f}`")
-        st.caption("0~25 극단적 공포 / 25~45 공포 / 45~55 중립 / 55~75 탐욕 / 75~100 극단적 탐욕")
-else:
-    err = fg.get("error", "알 수 없는 오류") if fg else "응답 없음"
-    st.warning(f"공포탐욕지수 조회 실패: {err}")
+def render_section_fear_greed():
+    section_title(2, "CNN 공포탐욕지수")
+    fg = dfetch.fetch_fear_greed()
+    if fg and "error" not in fg:
+        rating_kor = RATING_KOR.get((fg["rating"] or "").lower(), fg["rating"])
+        cga, cgb = st.columns([1, 1])
+        with cga:
+            st.plotly_chart(
+                fear_greed_gauge(fg["score"], fg["rating"]),
+                use_container_width=True, config=PLOT_CONFIG,
+            )
+        with cgb:
+            st.markdown(f"**현재**: `{fg['score']:.1f}` ({rating_kor})")
+            if fg.get("previous_close") is not None:
+                st.markdown(f"- 전일: `{float(fg['previous_close']):.1f}`")
+            if fg.get("previous_1_week") is not None:
+                st.markdown(f"- 1주 전: `{float(fg['previous_1_week']):.1f}`")
+            if fg.get("previous_1_month") is not None:
+                st.markdown(f"- 1개월 전: `{float(fg['previous_1_month']):.1f}`")
+            if fg.get("previous_1_year") is not None:
+                st.markdown(f"- 1년 전: `{float(fg['previous_1_year']):.1f}`")
+            st.caption("0~25 극단적 공포 / 25~45 공포 / 45~55 중립 / 55~75 탐욕 / 75~100 극단적 탐욕")
+    else:
+        err = fg.get("error", "알 수 없는 오류") if fg else "응답 없음"
+        st.warning(f"공포탐욕지수 조회 실패: {err}")
 
-st.divider()
 
 # =========================
 # 3. Volatility Indices (VIX, MOVE)
 # =========================
-section_title(3, "변동성 지수 — VIX (주식) · MOVE (채권)")
-vcols = st.columns(2)
-with vcols[0]:
-    vol_card("VIX", "^VIX", config.VIX_LEVELS, risk.interpret_vix)
-with vcols[1]:
-    vol_card("MOVE", "^MOVE", config.MOVE_LEVELS, risk.interpret_move)
+def render_section_volatility():
+    section_title(3, "변동성 지수 — VIX (주식) · MOVE (채권)")
+    vcols = st.columns(2)
+    with vcols[0]:
+        vol_card("VIX", "^VIX", config.VIX_LEVELS, risk.interpret_vix)
+    with vcols[1]:
+        vol_card("MOVE", "^MOVE", config.MOVE_LEVELS, risk.interpret_move)
 
-st.divider()
 
 # =========================
 # 4. Bonds & Commodities
 # =========================
-section_title(4, "채권 & 원자재")
-fred_key = config.get_fred_api_key()
-yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
-hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
+def render_section_bonds():
+    section_title(4, "채권 & 원자재")
+    fred_key = config.get_fred_api_key()
+    yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
+    hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
 
-cols = st.columns(7)
+    slots = st.columns(4) + st.columns(4)
 
-def fred_caption(api_key: str) -> str:
-    return "FRED API 키를 확인해 주세요" if not api_key else "FRED 응답 일시 지연 — 잠시 후 새로고침"
+    with slots[0]:
+        if not yield_df.empty:
+            latest_y = float(yield_df["value"].iloc[-1])
+            prev_y = float(yield_df["value"].iloc[-2]) if len(yield_df) >= 2 else latest_y
+            st.metric(
+                "10Y 금리", f"{latest_y:.2f}%",
+                delta=f"{(latest_y - prev_y)*100:+.0f}bp", delta_color="off",
+            )
+            st.caption(f"기준일: {yield_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
+        else:
+            st.metric("10Y 금리", "데이터 없음")
+            st.caption(fred_caption(fred_key))
 
-with cols[0]:
-    if not yield_df.empty:
-        latest_y = float(yield_df["value"].iloc[-1])
-        prev_y = float(yield_df["value"].iloc[-2]) if len(yield_df) >= 2 else latest_y
-        st.metric("10Y 금리", f"{latest_y:.2f}%", delta=f"{(latest_y - prev_y)*100:+.0f}bp")
-        st.caption(f"기준일: {yield_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-    else:
-        st.metric("10Y 금리", "데이터 없음")
-        st.caption(fred_caption(fred_key))
+    with slots[1]:
+        if not hy_df.empty:
+            latest_h = float(hy_df["value"].iloc[-1])
+            prev_h = float(hy_df["value"].iloc[-2]) if len(hy_df) >= 2 else latest_h
+            st.metric(
+                "HY 스프레드", f"{latest_h:.2f}%",
+                delta=f"{(latest_h - prev_h)*100:+.0f}bp", delta_color="inverse",
+            )
+            st.caption(f"기준일: {hy_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
+        else:
+            st.metric("HY 스프레드", "데이터 없음")
+            st.caption(fred_caption(fred_key))
 
-with cols[1]:
-    if not hy_df.empty:
-        latest_h = float(hy_df["value"].iloc[-1])
-        prev_h = float(hy_df["value"].iloc[-2]) if len(hy_df) >= 2 else latest_h
-        st.metric("HY 스프레드", f"{latest_h:.2f}%", delta=f"{(latest_h - prev_h)*100:+.0f}bp")
-        st.caption(f"기준일: {hy_df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-    else:
-        st.metric("HY 스프레드", "데이터 없음")
-        st.caption(fred_caption(fred_key))
+    for i, (name, ticker) in enumerate(config.COMMODITIES_FX.items()):
+        with slots[i + 2]:
+            commodity_metric(name, ticker)
 
-remaining = list(config.COMMODITIES_FX.items())
-for i, (name, ticker) in enumerate(remaining):
-    with cols[i + 2]:
-        commodity_metric(name, ticker)
-
-st.divider()
 
 # =========================
 # 5. Risk Interpretation
 # =========================
-section_title(5, "시장 위험 해석 (10Y · HY 스프레드 · VIX · MOVE)")
+def render_section_risk():
+    section_title(5, "시장 위험 해석 (10Y · HY 스프레드 · VIX · MOVE)")
+    fred_key = config.get_fred_api_key()
+    yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
+    hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
 
-if yield_df.empty or hy_df.empty:
-    st.info("FRED API 키가 설정되지 않으면 위험 해석을 표시할 수 없습니다.")
-else:
+    if yield_df.empty or hy_df.empty:
+        st.info(fred_caption(fred_key))
+        return
+
     yield_sig = risk.interpret_10y(yield_df["value"])
     hy_sig = risk.interpret_hy_spread(hy_df["value"])
     yc = (yield_df["value"].iloc[-1] - yield_df["value"].iloc[-6]) * 100 if len(yield_df) >= 6 else 0
     hc = (hy_df["value"].iloc[-1] - hy_df["value"].iloc[-6]) * 100 if len(hy_df) >= 6 else 0
     combined = risk.combine(yield_sig, hy_sig, yc, hc)
 
-    vix_df = dfetch.fetch_index_history("^VIX", period="6mo")
-    move_df = dfetch.fetch_index_history("^MOVE", period="6mo")
-    vix_sig = risk.interpret_vix(float(vix_df["Close"].iloc[-1])) if not vix_df.empty else None
-    move_sig = risk.interpret_move(float(move_df["Close"].iloc[-1])) if not move_df.empty else None
+    # 섹션 3과 같은 기간을 써서 캐시를 공유한다
+    vix_df = dfetch.fetch_index_history("^VIX", period="1y")
+    move_df = dfetch.fetch_index_history("^MOVE", period="1y")
+    vix_closes = vix_df["Close"].dropna() if not vix_df.empty else pd.Series(dtype=float)
+    move_closes = move_df["Close"].dropna() if not move_df.empty else pd.Series(dtype=float)
+    vix_sig = risk.interpret_vix(float(vix_closes.iloc[-1])) if not vix_closes.empty else None
+    move_sig = risk.interpret_move(float(move_closes.iloc[-1])) if not move_closes.empty else None
 
     rcols = st.columns(2)
     with rcols[0]:
@@ -614,7 +708,7 @@ else:
         st.markdown("""
 **10년물 금리 (5일 변동 기준)**
 - 🟢 ±30bp 이내: 안정
-- 🟡 -30bp 이하 급락: 경기 둔화 / 안전자산 쏠림
+- 🟠 -30bp 이하 급락: 경기 둔화 / 안전자산 쏠림
 - 🔴 +30bp 이상 급등: 주식 PER 압박, 성장주 매도 위험
 
 **하이일드 스프레드 (절대 수준 기준, FRED BAMLH0A0HYM2)**
@@ -642,14 +736,10 @@ else:
 - 🔴 140+: 채권시장 스트레스 (2022~2023 SVB 사태급)
 """)
 
-st.divider()
 
 # =========================
-# 6. Sector ETFs (좌하단)
+# 6. Sector / Stock Tracker
 # =========================
-section_title(6, "섹터 · 종목 트래커")
-
-
 def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = ""):
     cols = st.columns([1, 2.4])
     with cols[0]:
@@ -669,13 +759,15 @@ def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = "")
                 delta=f"{info['change_pct']:+.2f}%",
             )
             st.caption(f"기준일: {info['as_of']}")
+            fallback_caption(info, ticker)
 
     with cols[1]:
         df = dfetch.fetch_index_history(ticker, period="2y")
-        if df.empty:
+        closes = df["Close"].dropna() if not df.empty else pd.Series(dtype=float)
+        if closes.empty:
             st.warning("데이터 없음")
             return
-        last_close = float(df["Close"].iloc[-1])
+        last_close = float(closes.iloc[-1])
         ma200 = df["MA200"].dropna()
         ma_value = float(ma200.iloc[-1]) if not ma200.empty else None
         vs_ma_pct = ((last_close / ma_value) - 1) * 100 if ma_value else None
@@ -688,16 +780,13 @@ def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = "")
                 f"(MA200: <span class='num'>${ma_value:,.2f}</span>)",
                 unsafe_allow_html=True,
             )
+        fallback_caption(df, ticker)
 
         chart_df = df.tail(260).reset_index()
-        primary = line_color()
-        r, g, b = (int(primary[i:i+2], 16) for i in (1, 3, 5))
-        fill = f"rgba({r}, {g}, {b}, 0.08)"
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=chart_df["Date"], y=chart_df["Close"],
-            name="Close", line=dict(width=2.5, color=primary),
-            fill="tozeroy", fillcolor=fill,
+            name="Close", line=dict(width=2.5, color=line_color()),
         ))
         fig.add_trace(go.Scatter(
             x=chart_df["Date"], y=chart_df["MA200"],
@@ -710,22 +799,48 @@ def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = "")
             xaxis=dict(showgrid=False),
             yaxis=dict(showgrid=True, gridcolor=grid_color()),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
 
 
-tab_labels = ["섹터 ETF", "M7", "반도체"] + list(config.SECTOR_LEADERS.keys())
-tabs = st.tabs(tab_labels)
+def render_section_tracker():
+    section_title(6, "섹터 · 종목 트래커")
+    tabs = st.tabs(["섹터 ETF", "Magnificent 7", "반도체", "섹터별 대형주"])
+    with tabs[0]:
+        render_picker_chart(config.SECTOR_ETFS, default_idx=7, key_prefix="sec")
+    with tabs[1]:
+        render_picker_chart(config.MAG7, default_idx=6, key_prefix="m7")
+    with tabs[2]:
+        render_picker_chart(config.SEMICONDUCTORS, default_idx=0, key_prefix="semi")
+    with tabs[3]:
+        sector_pick = st.selectbox(
+            "섹터 선택",
+            list(config.SECTOR_LEADERS.keys()),
+            index=0,
+            key="leaders_sector",
+        )
+        render_picker_chart(
+            config.SECTOR_LEADERS[sector_pick],
+            default_idx=0,
+            key_prefix=f"lead_{sector_pick}",
+        )
 
-with tabs[0]:
-    render_picker_chart(config.SECTOR_ETFS, default_idx=7, key_prefix="sec")
-with tabs[1]:
-    render_picker_chart(config.MAG7, default_idx=6, key_prefix="m7")
-with tabs[2]:
-    render_picker_chart(config.SEMICONDUCTORS, default_idx=0, key_prefix="semi")
 
-for i, (sector_name, group) in enumerate(config.SECTOR_LEADERS.items(), start=3):
-    with tabs[i]:
-        render_picker_chart(group, default_idx=0, key_prefix=f"lead_{sector_name}")
+# =========================
+# Page assembly — 각 섹션은 독립적으로 실패한다
+# =========================
+_safe_section("헤더", render_header)
+st.divider()
+_safe_section("미국 3대 지수", render_section_indices)
+st.divider()
+_safe_section("공포탐욕지수", render_section_fear_greed)
+st.divider()
+_safe_section("변동성 지수", render_section_volatility)
+st.divider()
+_safe_section("채권 & 원자재", render_section_bonds)
+st.divider()
+_safe_section("시장 위험 해석", render_section_risk)
+st.divider()
+_safe_section("섹터 · 종목 트래커", render_section_tracker)
 
 st.divider()
 st.caption("본 대시보드는 정보 제공용이며 투자 권유가 아닙니다.")

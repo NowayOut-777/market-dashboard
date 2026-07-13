@@ -44,7 +44,7 @@ MAG7 = {
 }
 
 SEMICONDUCTORS = {
-    "SMH (필라델피아 반도체 ETF)": "SMH",
+    "SMH (VanEck 반도체 ETF)": "SMH",
     "SOXX (iShares 반도체 ETF)": "SOXX",
     "Nvidia (NVDA)": "NVDA",
     "AMD (AMD)": "AMD",
