@@ -134,6 +134,38 @@ git push -u origin main
 
 ---
 
+## 📧 200일선 이메일 알림 (GitHub Actions)
+
+매 거래일 미국 장 마감 직후(한국시간 오전 6:40경) 3대 지수를 체크해서, 아래 이벤트 발생 시에만 메일을 보냅니다:
+- 🔴 200일선 **하향 돌파** / 🟢 **상향 돌파**
+- 🟡 200일선 **±1% 이내 진입** (밖에서 안으로 들어올 때 1회)
+
+이벤트가 없으면 메일이 오지 않습니다. PC가 꺼져 있어도, 대시보드를 아무도 안 열어도 동작합니다.
+
+### 설정 (GitHub Secrets)
+
+저장소 → **Settings → Secrets and variables → Actions → New repository secret** 에서 등록:
+
+| Secret | 값 | 필수 |
+|---|---|---|
+| `ALERT_EMAIL_TO` | 받을 이메일 주소 | ✅ |
+| `RESEND_API_KEY` | [resend.com](https://resend.com) 가입 후 API 키 | 둘 중 하나 |
+| `SMTP_USER` + `SMTP_PASS` | Gmail 주소 + [앱 비밀번호](https://myaccount.google.com/apppasswords) | 둘 중 하나 |
+
+- **Resend 경로 (추천)**: 가입만 하면 됨. 무료 플랜은 가입한 본인 이메일로만 발송 가능.
+- **Gmail 경로**: 구글 계정 2단계 인증 활성화 → 앱 비밀번호 16자리 발급 → `SMTP_PASS`에 등록.
+
+### 테스트
+
+저장소 → **Actions → MA200 Alert → Run workflow** → `force_send` 체크 → 실행.
+이벤트가 없어도 현재 상태 메일이 오면 설정 성공.
+
+### 조건 변경
+
+`scripts/check_ma200.py` 상단의 `BAND_PCT = 1.0` (근접 기준 %) 수정 후 push.
+
+---
+
 ## 🛑 보안 체크리스트
 
 - [x] `.streamlit/secrets.toml`은 `.gitignore` 등록 — 절대 커밋 금지

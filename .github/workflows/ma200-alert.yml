@@ -1,0 +1,35 @@
+name: MA200 Alert
+
+on:
+  schedule:
+    # 21:40 UTC = 미국 장 마감(16:00 ET) 직후, 한국시간 오전 6:40 (서머타임 기준)
+    - cron: "40 21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force_send:
+        description: "이벤트가 없어도 현재 상태 메일 발송 (설정 테스트)"
+        type: boolean
+        default: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install --quiet yfinance "pandas>=2.0,<3.0" requests
+
+      - name: Check MA200 and send alert
+        run: python scripts/check_ma200.py
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          FORCE_SEND: ${{ inputs.force_send }}
