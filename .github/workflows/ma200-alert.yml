@@ -2,8 +2,9 @@ name: MA200 Alert
 
 on:
   schedule:
-    # 21:40 UTC = 미국 장 마감(16:00 ET) 직후, 한국시간 오전 6:40 (서머타임 기준)
-    - cron: "40 21 * * 1-5"
+    # 21:47 UTC = 미국 장 마감(16:00 ET) 직후, 한국시간 오전 6:47 (서머타임 기준)
+    # 정각/10분 단위는 GitHub 혼잡으로 최대 1~2시간 지연되므로 홀수 분을 사용
+    - cron: "47 21 * * 1-5"
   workflow_dispatch:
     inputs:
       force_send:
@@ -11,16 +12,31 @@ on:
         type: boolean
         default: false
 
+# keepalive 단계가 이 워크플로를 API로 재활성화하려면 actions: write 필요
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Preflight — 알림 시크릿 확인
+        env:
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+        run: |
+          if [ -z "$ALERT_EMAIL_TO" ] || { [ -z "$RESEND_API_KEY" ] && [ -z "$SMTP_USER" ]; }; then
+            echo "::warning title=알림 시크릿 미설정::ALERT_EMAIL_TO 와 RESEND_API_KEY(또는 SMTP_USER/SMTP_PASS)를 등록해야 이벤트 발생 시 메일이 발송됩니다. README의 '200일선 이메일 알림' 참고."
+          fi
 
       - name: Install dependencies
         run: pip install --quiet yfinance "pandas>=2.0,<3.0" requests
@@ -33,3 +49,11 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           FORCE_SEND: ${{ inputs.force_send }}
+
+      # GitHub는 저장소에 60일간 커밋이 없으면 예약 워크플로를 자동으로 끈다.
+      # 매 실행 끝에 스스로를 다시 활성화해 비활성화 타이머를 리셋한다.
+      - name: Keepalive — 60일 비활성화 방지
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable ma200-alert.yml --repo "$GITHUB_REPOSITORY"
