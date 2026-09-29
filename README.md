@@ -3,12 +3,13 @@
 매일 갱신되는 미국 시장 모니터링 Streamlit 대시보드.
 
 ## 화면 구성
-1. 미국 3대 지수 (S&P 500 / NASDAQ 100 / Dow Jones) — 전일 종가 + 200일 이동평균
+0. 🤖 오늘의 AI 시장 브리핑 (Gemini) — 아래 지표들을 3~4줄로 요약 (`GEMINI_API_KEY` 설정 시에만 표시)
+1. 미국 3대 지수 (S&P 500 / NASDAQ 100 / Dow Jones) — 최근 종가 + 200일 이동평균
 2. CNN 공포탐욕지수
 3. 변동성 지수: VIX (S&P 500 옵션 IV) · MOVE (미 국채 옵션 IV)
 4. 채권/원자재: 10년물 금리 · HY 스프레드 · WTI · Brent · 금(선물) · 은(선물)
 5. 시장 위험 해석 (10Y · HY 스프레드 · VIX · MOVE 결합 신호)
-6. 섹터·종목 트래커 (14개 탭): 섹터 ETF · M7 · 반도체 · GICS 11개 섹터별 대형주
+6. 섹터·종목 트래커 (4개 탭): 섹터 ETF · M7 · 반도체 · 섹터별 대형주(GICS 11개 선택)
 
 다크/라이트 토글 지원, KBH 360 디자인 토큰 적용.
 
@@ -101,7 +102,7 @@ git push -u origin main
 ### 3단계 — 동작 확인
 - 발급받은 URL 접속
 - 비밀번호 입력 화면이 뜨면 ✅
-- 6개 섹션 + 14개 탭 모두 정상 렌더링되면 완료
+- 6개 섹션 + 트래커 4개 탭 모두 정상 렌더링되면 완료 (Gemini 키를 넣었다면 맨 위 AI 브리핑도)
 
 ### 4단계 — 지인에게 공유
 - URL + 비밀번호만 알려주면 됨
@@ -131,6 +132,36 @@ git push -u origin main
 종목 추가/제거: `INDICES`, `MAG7`, `SEMICONDUCTORS`, `SECTOR_LEADERS` 사전 편집.
 
 코드 수정 후 `git push` → Streamlit Cloud가 자동으로 재배포 (약 30초).
+
+---
+
+## 🤖 AI 시장 브리핑 (Gemini, 선택)
+
+[Google AI Studio](https://aistudio.google.com/apikey)에서 무료 Gemini API 키를 발급하면 두 곳에 AI 요약이 붙습니다.
+
+| 위치 | 내용 | 키를 넣는 곳 |
+|---|---|---|
+| 대시보드 맨 위 | 오늘 지표를 3~4줄로 요약 (최대 15분 간격 갱신) | Streamlit Cloud **Secrets** (+ 로컬은 `.streamlit/secrets.toml`) |
+| 200일선 알림 메일 | 이벤트의 의미를 한 단락으로 해설 | GitHub **Secrets** |
+
+**등록 방법** — 키는 채팅·코드·커밋 어디에도 붙여넣지 말고 아래처럼 직접 넣으세요.
+
+1. **Streamlit Cloud**: share.streamlit.io → 앱 ⋮ → **Settings → Secrets** 에 한 줄 추가 후 Save
+   ```toml
+   GEMINI_API_KEY = "발급받은_키"
+   ```
+2. **로컬 테스트용**: `.streamlit/secrets.toml` 에 같은 한 줄 추가 (gitignore 되어 있음)
+3. **GitHub (알림 해설)**: PowerShell에서 실행 → 뜨는 입력창에 키 붙여넣기 (화면에 안 보임)
+   ```powershell
+   gh secret set GEMINI_API_KEY
+   ```
+
+**동작 방식**
+- 키가 없으면 AI 기능만 조용히 꺼지고 나머지는 그대로 동작합니다.
+- 서버 전체 기준으로 Gemini 호출을 **최대 15분에 1회**로 제한합니다 (공개 페이지라 누가 새로고침을 연타해도 하루 최대 96회 — 무료 한도 안). 그 사이엔 직전 요약을 보여줍니다.
+- 한도 초과·장애 시 10분간 재호출을 멈추고, 직전 요약이 있으면 그것을, 없으면 안내 문구를 표시합니다.
+- 모델은 구글이 최신 모델로 계속 교체하는 `gemini-flash-latest` → `gemini-flash-lite-latest` 별칭을 쓰고, 둘 다 안 되면 이 키로 쓸 수 있는 모델 목록에서 최신 Flash를 자동으로 찾습니다. 모델이 단종돼도 손댈 필요가 없습니다. 특정 모델로 고정하려면 `GEMINI_MODEL` 시크릿을 추가하세요.
+- AI는 페이지에 있는 숫자만 근거로 요약하도록 지시되어 있으며, 매수·매도 추천이나 가격 예측은 하지 않습니다. 그래도 틀릴 수 있습니다.
 
 ---
 
@@ -193,12 +224,16 @@ Claude_test5/
 ├── data_fetch.py           # yfinance / FRED / CNN 데이터 수집
 ├── risk_interpreter.py     # 시장 위험 해석 로직
 ├── config.py               # 심볼·임계치·키 로더
+├── gemini_client.py        # Gemini API 호출 (대시보드·알림 공용)
+├── ai_briefing.py          # 대시보드 AI 브리핑 (지표 스냅샷 → 요약)
+├── scripts/check_ma200.py  # 200일선 알림 (GitHub Actions에서 실행)
+├── .github/workflows/      # 알림 스케줄
 ├── requirements.txt        # Python 의존성 (Streamlit Cloud 빌드 입력)
 ├── .python-version         # Python 버전 핀
 ├── .gitignore              # 시크릿/캐시 제외
 ├── .streamlit/
 │   ├── config.toml         # Streamlit 테마 (라이트 기본)
-│   ├── secrets.toml        # ❌ 커밋 금지 (FRED 키)
+│   ├── secrets.toml        # ❌ 커밋 금지 (FRED·Gemini 키)
 │   └── secrets.toml.example
 ├── run.bat                 # Windows 실행 헬퍼
 └── README.md               # 본 문서

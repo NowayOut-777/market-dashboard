@@ -36,11 +36,17 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -n "$ALERT_EMAIL_TO" ] && { [ -n "$RESEND_API_KEY" ] || { [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; }; }; then
             echo "::notice title=알림 경로::직접 메일 발송 (Resend/SMTP)"
           else
             echo "::notice title=알림 경로::GitHub 이슈 알림 — 소유자 계정 이메일로 전달됨 (메일 키 불필요)"
+          fi
+          if [ -n "$GEMINI_API_KEY" ]; then
+            echo "::notice title=AI 해설::켜짐 (Gemini)"
+          else
+            echo "::notice title=AI 해설::꺼짐 — GEMINI_API_KEY 시크릿을 등록하면 알림에 AI 해설이 붙습니다"
           fi
 
       - name: Install dependencies
@@ -54,6 +60,8 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           FORCE_SEND: ${{ inputs.force_send }}
 
       # GitHub는 저장소에 60일간 커밋이 없으면 예약 워크플로를 자동으로 끈다.

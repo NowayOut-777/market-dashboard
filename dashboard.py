@@ -19,8 +19,10 @@ def _log_error(label: str) -> None:
 
 
 try:
+    import ai_briefing
     import config
     import data_fetch as dfetch
+    import gemini_client
     import risk_interpreter as risk
 except Exception:
     _log_error("모듈 import 실패")
@@ -292,6 +294,13 @@ def render_theme_css():
         }
         .kbh-section-title h2 { margin: 0 !important; }
         .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--surface);
+            border-color: var(--border) !important;
+            border-radius: 10px !important;
+            box-shadow: var(--shadow-1);
+        }
         """
         + extra +
         "</style>"
@@ -305,7 +314,7 @@ except Exception:
     _log_error("테마 CSS 렌더링 실패")
 
 
-def section_title(num: int, title: str):
+def section_title(num, title: str):
     st.markdown(
         f"<div class='kbh-section-title'>"
         f"<span class='kbh-section-num'>{num}</span>"
@@ -826,10 +835,31 @@ def render_section_tracker():
 
 
 # =========================
+# AI Market Briefing (Gemini)
+# =========================
+def render_ai_briefing():
+    api_key = config.get_gemini_api_key()
+    if not api_key:
+        return
+    section_title("AI", "오늘의 AI 시장 브리핑")
+    with st.container(border=True):
+        try:
+            with st.spinner("Gemini가 오늘 지표를 요약하는 중…"):
+                text = ai_briefing.get_briefing(api_key, config.get_gemini_model())
+            st.markdown(text)
+        except gemini_client.GeminiError as e:
+            st.info(f"AI 브리핑을 불러오지 못했습니다 — {e}")
+    st.caption("Gemini가 이 페이지의 지표만 보고 작성한 요약입니다. 틀릴 수 있으며 투자 권유가 아닙니다 · 최대 15분 간격 갱신")
+    st.divider()
+
+
+# =========================
 # Page assembly — 각 섹션은 독립적으로 실패한다
 # =========================
 _safe_section("헤더", render_header)
 st.divider()
+# 브리핑은 맨 위 자리만 잡아두고 마지막에 채운다 — AI 응답을 기다리느라 나머지 섹션이 늦게 뜨지 않게
+briefing_slot = st.container()
 _safe_section("미국 3대 지수", render_section_indices)
 st.divider()
 _safe_section("공포탐욕지수", render_section_fear_greed)
@@ -844,3 +874,6 @@ _safe_section("섹터 · 종목 트래커", render_section_tracker)
 
 st.divider()
 st.caption("본 대시보드는 정보 제공용이며 투자 권유가 아닙니다.")
+
+with briefing_slot:
+    _safe_section("AI 시장 브리핑", render_ai_briefing)

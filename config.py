@@ -207,3 +207,23 @@ def get_app_password() -> str:
         return st.secrets.get("APP_PASSWORD", "")
     except Exception:
         return ""
+
+
+def _get_secret(name: str) -> str:
+    value = os.getenv(name, "")
+    if value:
+        return value
+    try:
+        import streamlit as st
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
+
+
+def get_gemini_api_key() -> str:
+    return _get_secret("GEMINI_API_KEY")
+
+
+def get_gemini_model() -> str:
+    # 비워두면 gemini_client.DEFAULT_MODELS 순서대로 시도
+    return _get_secret("GEMINI_MODEL")

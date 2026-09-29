@@ -16,7 +16,10 @@
   DRY_RUN=1        → 메일 대신 stdout 출력 (로컬 테스트용)
 """
 
+import html as html_lib
+import json
 import os
+import re
 import smtplib
 import sys
 import time
@@ -27,6 +30,9 @@ from email.mime.text import MIMEText
 import pandas as pd
 import requests
 import yfinance as yf
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from gemini_client import GeminiError, generate as gemini_generate  # noqa: E402
 
 INDICES = {
     "S&P 500": ("^GSPC", "SPY"),
@@ -98,7 +104,56 @@ def display_name(r: dict) -> str:
     return r["name"] if r["source"] == primary else f"{r['name']} ({r['source']} 대체)"
 
 
-def build_email(results: list, triggered: list) -> tuple:
+AI_SYSTEM = """너는 미국 증시 지표를 한국 개인투자자에게 쉽게 설명하는 시장 해설가다.
+주어진 JSON 숫자만 근거로 쓰고, 데이터에 없는 뉴스·원인·전망은 지어내지 않는다.
+매수/매도 추천, 목표가, 가격 예측은 하지 않는다. 한국어 존댓말(~입니다)로 쓴다."""
+
+AI_PROMPT = """3대 지수의 200일 이동평균선 알림 데이터입니다 (이격률 = 종가가 200일선보다 몇 % 위/아래인지).
+
+{data}
+
+다음 내용을 3~4문장의 한 단락으로 써 주세요. 머리말, 목록, 제목 없이 본문만 씁니다.
+1) 이벤트가 있다면 무엇이 일어났는지, 없다면 현재 위치가 어떤지
+2) 200일선이 시장에서 보통 어떤 의미로 받아들여지는지 한 문장
+3) 다음 며칠간 확인하면 좋은 점 (예: 돌파 후 며칠 유지되는지)"""
+
+
+def ai_commentary(results: list) -> str:
+    """GEMINI_API_KEY가 있으면 AI 해설 한 단락을 만든다. 없거나 실패하면 빈 문자열."""
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        return ""
+    data = [
+        {"지수": display_name(r), "종가": round(r["close"], 2), "200일선": round(r["ma200"], 2),
+         "이격률_%": round(r["gap_pct"], 2), "기준일": str(r["as_of"]),
+         "이벤트": [e.split(" ", 1)[1] for e in r["events"]] or "없음"}
+        for r in results
+    ]
+    try:
+        return gemini_generate(
+            AI_PROMPT.format(data=json.dumps(data, ensure_ascii=False, indent=1)),
+            api_key, os.getenv("GEMINI_MODEL", ""), system=AI_SYSTEM,
+        )
+    except GeminiError as e:
+        print(f"::warning::AI 해설 생략 — {e}")
+        return ""
+
+
+def commentary_html(text: str) -> str:
+    if not text:
+        return ""
+    body = html_lib.escape(text)
+    body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body).replace("\n", "<br>")
+    return (
+        "<div style='margin-top:16px;padding:12px 14px;background:#f3f5f8;border-radius:10px'>"
+        "<div style='font-weight:600;margin-bottom:6px'>🤖 AI 해설 (Gemini)</div>"
+        f"<div style='color:#2b3140;line-height:1.6'>{body}</div>"
+        "<div style='color:#6b7280;font-size:12px;margin-top:6px'>AI가 생성한 해설로 틀릴 수 있으며 투자 권유가 아닙니다.</div>"
+        "</div>"
+    )
+
+
+def build_email(results: list, triggered: list, commentary: str = "") -> tuple:
     if triggered:
         headline = " / ".join(
             f"{r['name']}: {', '.join(e.split(' ', 1)[1] for e in r['events'])}"
@@ -134,6 +189,7 @@ def build_email(results: list, triggered: list) -> tuple:
         </tr>
         {''.join(rows)}
       </table>
+      {commentary_html(commentary)}
       <p style="color:#6b7280;font-size:13px">
         돌파/±{BAND_PCT:.0f}% 진입 시에만 발송됩니다 · 정보 제공용, 투자 권유 아님<br>
         대시보드: https://market-dashboard-ver1.streamlit.app
@@ -143,7 +199,7 @@ def build_email(results: list, triggered: list) -> tuple:
     return subject, html
 
 
-def build_markdown(results: list) -> str:
+def build_markdown(results: list, commentary: str = "") -> str:
     as_of = results[0]["as_of"] if results else ""
     lines = [
         f"### 📊 3대 지수 200일선 체크 (기준일 {as_of})",
@@ -157,6 +213,15 @@ def build_markdown(results: list) -> str:
             f"| **{display_name(r)}** | {r['close']:,.2f} | {r['ma200']:,.2f} "
             f"| {r['gap_pct']:+.2f}% | {ev} |"
         )
+    if commentary:
+        lines += [
+            "",
+            "#### 🤖 AI 해설 (Gemini)",
+            # GitHub 마크다운도 $...$를 수식으로 렌더링한다
+            commentary.replace("$", "\\$"),
+            "",
+            "_AI가 생성한 해설로 틀릴 수 있으며 투자 권유가 아닙니다._",
+        ]
     lines += [
         "",
         f"돌파/±{BAND_PCT:.0f}% 진입 시에만 발송됩니다 · 정보 제공용, 투자 권유 아님",
@@ -212,8 +277,9 @@ def write_step_summary(markdown: str) -> None:
 
 
 def send_alert(results: list, triggered: list) -> None:
-    subject, html = build_email(results, triggered)
-    markdown = build_markdown(results)
+    commentary = ai_commentary(results)
+    subject, html = build_email(results, triggered, commentary)
+    markdown = build_markdown(results, commentary)
 
     if DRY_RUN:
         print("=== DRY RUN — 알림 내용 ===")
