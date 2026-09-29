@@ -1,6 +1,10 @@
 import hmac
 import html
+import importlib
+import os
 import re
+import sys
+import threading
 import time
 import traceback
 
@@ -20,12 +24,47 @@ def _log_error(label: str) -> None:
     print(f"[dashboard] {label}:\n{traceback.format_exc()}", flush=True)
 
 
+# 의존 순서 — 앞 모듈이 바뀌면 뒤 모듈도 다시 불러온다
+LOCAL_MODULES = ("config", "gemini_client", "data_fetch", "risk_interpreter", "ai_briefing")
+
+
+@st.cache_resource
+def _reload_lock() -> threading.Lock:
+    return threading.Lock()
+
+
+def _reload_changed_local_modules() -> None:
+    """Streamlit Cloud는 git push 뒤 이 메인 스크립트만 새로 읽고, import해 둔 로컬 모듈은 옛 버전을
+    메모리에 그대로 쓴다. 그러면 새 화면 코드가 옛 모듈에 없는 함수를 불러 섹션이 깨지므로,
+    파일이 바뀐 모듈을 다시 불러와 버전이 섞이지 않게 한다."""
+    with _reload_lock():
+        stale = False
+        for name in LOCAL_MODULES:
+            mod = sys.modules.get(name)
+            path = getattr(mod, "__file__", None) if mod else None
+            if not path:
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if stale or getattr(mod, "_loaded_mtime", None) != mtime:
+                importlib.reload(mod)
+                mod._loaded_mtime = mtime
+                stale = True
+
+
 try:
+    _reload_changed_local_modules()
     import ai_briefing
     import config
     import data_fetch as dfetch
     import gemini_client
     import risk_interpreter as risk
+    for _name in LOCAL_MODULES:
+        _mod = sys.modules.get(_name)
+        if _mod is not None and not hasattr(_mod, "_loaded_mtime"):
+            _mod._loaded_mtime = os.path.getmtime(_mod.__file__)
 except Exception:
     _log_error("모듈 import 실패")
     st.error("⚠️ 앱 초기화 중 오류가 발생했습니다. 잠시 후 새로고침해 주세요.")
