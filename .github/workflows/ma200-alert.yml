@@ -12,10 +12,12 @@ on:
         type: boolean
         default: false
 
-# keepalive 단계가 이 워크플로를 API로 재활성화하려면 actions: write 필요
+# actions: write — keepalive 단계가 이 워크플로를 API로 재활성화
+# issues: write  — 메일 키가 없을 때 이슈로 알림 (GitHub가 소유자 이메일로 전달)
 permissions:
   actions: write
   contents: read
+  issues: write
 
 jobs:
   check:
@@ -28,14 +30,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Preflight — 알림 시크릿 확인
+      - name: Preflight — 알림 경로 확인
         env:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
         run: |
-          if [ -z "$ALERT_EMAIL_TO" ] || { [ -z "$RESEND_API_KEY" ] && [ -z "$SMTP_USER" ]; }; then
-            echo "::warning title=알림 시크릿 미설정::ALERT_EMAIL_TO 와 RESEND_API_KEY(또는 SMTP_USER/SMTP_PASS)를 등록해야 이벤트 발생 시 메일이 발송됩니다. README의 '200일선 이메일 알림' 참고."
+          if [ -n "$ALERT_EMAIL_TO" ] && { [ -n "$RESEND_API_KEY" ] || [ -n "$SMTP_USER" ]; }; then
+            echo "::notice title=알림 경로::직접 메일 발송 (Resend/SMTP)"
+          else
+            echo "::notice title=알림 경로::GitHub 이슈 알림 — 소유자 계정 이메일로 전달됨 (메일 키 불필요)"
           fi
 
       - name: Install dependencies
@@ -48,6 +52,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          GITHUB_TOKEN: ${{ github.token }}
           FORCE_SEND: ${{ inputs.force_send }}
 
       # GitHub는 저장소에 60일간 커밋이 없으면 예약 워크플로를 자동으로 끈다.

@@ -6,9 +6,10 @@
   3. 근접 진입: 이격률이 ±BAND_PCT% 밖 → 안으로 진입
 
 발송 수단 (환경변수로 선택, 우선순위 순):
-  - RESEND_API_KEY            → Resend API (from: onboarding@resend.dev)
-  - SMTP_USER + SMTP_PASS     → Gmail SMTP (앱 비밀번호)
-수신자: ALERT_EMAIL_TO (Resend 무료 플랜은 가입 이메일로만 발송 가능)
+  - ALERT_EMAIL_TO + RESEND_API_KEY        → Resend API (from: onboarding@resend.dev)
+  - ALERT_EMAIL_TO + SMTP_USER + SMTP_PASS → Gmail SMTP (앱 비밀번호)
+  - (위 둘 다 없으면) GITHUB_TOKEN          → 저장소에 이슈를 만들고 소유자를 담당자로 지정.
+    GitHub가 소유자 계정 이메일로 알림 메일을 보내므로 별도 키 없이 동작한다.
 
 기타 환경변수:
   FORCE_SEND=true  → 이벤트가 없어도 현재 상태 메일 발송 (설정 테스트용)
@@ -34,6 +35,7 @@ INDICES = {
 }
 MA_WINDOW = 200
 BAND_PCT = 1.0
+ALERT_LABEL = "ma200-alert"
 
 DRY_RUN = os.getenv("DRY_RUN", "") == "1"
 FORCE_SEND = os.getenv("FORCE_SEND", "").lower() == "true"
@@ -91,6 +93,11 @@ def analyze(name: str, closes: pd.Series, source: str) -> dict:
     }
 
 
+def display_name(r: dict) -> str:
+    primary = INDICES[r["name"]][0]
+    return r["name"] if r["source"] == primary else f"{r['name']} ({r['source']} 대체)"
+
+
 def build_email(results: list, triggered: list) -> tuple:
     if triggered:
         headline = " / ".join(
@@ -106,7 +113,7 @@ def build_email(results: list, triggered: list) -> tuple:
         ev = "<br>".join(r["events"]) if r["events"] else "—"
         rows.append(
             f"<tr>"
-            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e8ee'><b>{r['name']}</b></td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e8ee'><b>{display_name(r)}</b></td>"
             f"<td style='padding:8px 12px;border-bottom:1px solid #e5e8ee;text-align:right'>{r['close']:,.2f}</td>"
             f"<td style='padding:8px 12px;border-bottom:1px solid #e5e8ee;text-align:right'>{r['ma200']:,.2f}</td>"
             f"<td style='padding:8px 12px;border-bottom:1px solid #e5e8ee;text-align:right'>{r['gap_pct']:+.2f}%</td>"
@@ -136,19 +143,83 @@ def build_email(results: list, triggered: list) -> tuple:
     return subject, html
 
 
-def send_email(subject: str, html: str) -> None:
-    to_addr = os.getenv("ALERT_EMAIL_TO", "")
+def build_markdown(results: list) -> str:
+    as_of = results[0]["as_of"] if results else ""
+    lines = [
+        f"### 📊 3대 지수 200일선 체크 (기준일 {as_of})",
+        "",
+        "| 지수 | 종가 | MA200 | 이격률 | 이벤트 |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for r in results:
+        ev = "<br>".join(r["events"]) if r["events"] else "—"
+        lines.append(
+            f"| **{display_name(r)}** | {r['close']:,.2f} | {r['ma200']:,.2f} "
+            f"| {r['gap_pct']:+.2f}% | {ev} |"
+        )
+    lines += [
+        "",
+        f"돌파/±{BAND_PCT:.0f}% 진입 시에만 발송됩니다 · 정보 제공용, 투자 권유 아님",
+        "대시보드: https://market-dashboard-ver1.streamlit.app",
+    ]
+    return "\n".join(lines)
+
+
+def create_github_issue(title: str, body: str) -> None:
+    token = os.getenv("GITHUB_TOKEN", "")
+    repo = os.getenv("GITHUB_REPOSITORY", "")
+    owner = os.getenv("GITHUB_REPOSITORY_OWNER", "") or repo.split("/")[0]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    api = f"https://api.github.com/repos/{repo}"
+    # 라벨이 이미 있으면 422 — 무시해도 된다
+    requests.post(
+        f"{api}/labels", headers=headers, timeout=20,
+        json={"name": ALERT_LABEL, "color": "d12d3a", "description": "200일선 알림"},
+    )
+    r = requests.post(
+        f"{api}/issues", headers=headers, timeout=20,
+        json={
+            "title": title,
+            "body": f"{body}\n\ncc @{owner}",
+            "assignees": [owner],
+            "labels": [ALERT_LABEL],
+        },
+    )
+    if r.status_code >= 300:
+        print(f"::error::GitHub 이슈 생성 실패 ({r.status_code}): {r.text}")
+        sys.exit(1)
+    print(f"GitHub 이슈 알림 발송 완료 → {r.json().get('html_url')} (담당자 @{owner}, 계정 이메일로 전달)")
+
+
+def send_alert(results: list, triggered: list) -> None:
+    subject, html = build_email(results, triggered)
+    markdown = build_markdown(results)
 
     if DRY_RUN:
-        print("=== DRY RUN — 메일 내용 ===")
+        print("=== DRY RUN — 알림 내용 ===")
         print("Subject:", subject)
-        print(html)
+        print(markdown)
         return
 
-    if not to_addr:
-        print("::error::ALERT_EMAIL_TO 시크릿이 설정되지 않았습니다.")
+    to_addr = os.getenv("ALERT_EMAIL_TO", "")
+    has_email_sender = bool(os.getenv("RESEND_API_KEY")) or bool(
+        os.getenv("SMTP_USER") and os.getenv("SMTP_PASS"))
+
+    if to_addr and has_email_sender:
+        send_email(subject, html, to_addr)
+    elif os.getenv("GITHUB_TOKEN") and os.getenv("GITHUB_REPOSITORY"):
+        create_github_issue(subject, markdown)
+    else:
+        print("::error::발송 수단이 없습니다. GitHub Actions에서 실행하거나 "
+              "ALERT_EMAIL_TO + RESEND_API_KEY(또는 SMTP_USER/SMTP_PASS)를 설정하세요.")
         sys.exit(1)
 
+
+def send_email(subject: str, html: str, to_addr: str) -> None:
     resend_key = os.getenv("RESEND_API_KEY", "")
     smtp_user = os.getenv("SMTP_USER", "")
     smtp_pass = os.getenv("SMTP_PASS", "")
@@ -179,9 +250,6 @@ def send_email(subject: str, html: str) -> None:
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [to_addr], msg.as_string())
         print(f"Gmail SMTP로 발송 완료 → {to_addr}")
-    else:
-        print("::error::발송 수단이 없습니다. RESEND_API_KEY 또는 SMTP_USER/SMTP_PASS 시크릿을 등록하세요.")
-        sys.exit(1)
 
 
 def main() -> None:
@@ -213,8 +281,7 @@ def main() -> None:
 
     triggered = [r for r in results if r["events"]]
     if triggered or FORCE_SEND:
-        subject, html = build_email(results, triggered)
-        send_email(subject, html)
+        send_alert(results, triggered)
     else:
         print("모든 지수가 200일선에서 충분히 떨어져 있습니다 — 메일 없음.")
 

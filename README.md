@@ -142,23 +142,27 @@ git push -u origin main
 
 이벤트가 없으면 메일이 오지 않습니다. PC가 꺼져 있어도, 대시보드를 아무도 안 열어도 동작합니다.
 
-### 설정 (GitHub Secrets)
+### 알림 받는 방법 (기본값: 설정 불필요)
 
-저장소 → **Settings → Secrets and variables → Actions → New repository secret** 에서 등록:
+**아무것도 안 해도 동작합니다.** 이벤트가 생기면 워크플로가 이 저장소에 `ma200-alert` 라벨의 이슈를 만들고 소유자를 담당자로 지정합니다. GitHub가 이를 **GitHub 계정 이메일로 알림 메일**로 보내줍니다. 필요한 권한은 워크플로 기본 토큰뿐이라 키 발급이 필요 없습니다.
 
-| Secret | 값 | 필수 |
-|---|---|---|
-| `ALERT_EMAIL_TO` | 받을 이메일 주소 | ✅ |
-| `RESEND_API_KEY` | [resend.com](https://resend.com) 가입 후 API 키 | 둘 중 하나 |
-| `SMTP_USER` + `SMTP_PASS` | Gmail 주소 + [앱 비밀번호](https://myaccount.google.com/apppasswords) | 둘 중 하나 |
+- 메일이 안 오면 GitHub → **Settings → Notifications** 에서 *Participating* 과 *Watching* 의 **Email** 이 켜져 있는지 확인하세요.
+- 알림 이력은 저장소 **Issues** 탭에서 `label:ma200-alert` 로 모아 볼 수 있습니다.
 
-- **Resend 경로 (추천)**: 가입만 하면 됨. 무료 플랜은 가입한 본인 이메일로만 발송 가능.
-- **Gmail 경로**: 구글 계정 2단계 인증 활성화 → 앱 비밀번호 16자리 발급 → `SMTP_PASS`에 등록.
+#### (선택) 예쁜 HTML 메일로 직접 받기
+
+GitHub 알림 대신 표가 들어간 HTML 메일을 원하면 저장소 **Settings → Secrets and variables → Actions** 에 아래를 등록하세요. 등록되면 자동으로 이 경로가 우선합니다.
+
+| Secret | 값 |
+|---|---|
+| `ALERT_EMAIL_TO` | 받을 이메일 주소 |
+| `RESEND_API_KEY` | [resend.com](https://resend.com) 가입 후 API 키 (무료 플랜은 가입 이메일로만 발송) |
+| 또는 `SMTP_USER` + `SMTP_PASS` | Gmail 주소 + [앱 비밀번호](https://myaccount.google.com/apppasswords) |
 
 ### 테스트
 
 저장소 → **Actions → MA200 Alert → Run workflow** → `force_send` 체크 → 실행.
-이벤트가 없어도 현재 상태 메일이 오면 설정 성공.
+이벤트가 없어도 현재 상태 알림(이슈 또는 메일)이 오면 설정 성공. 테스트로 만들어진 이슈는 닫아도 됩니다.
 
 ### 조건 변경
 
@@ -166,7 +170,7 @@ git push -u origin main
 
 ### 운영 시 알아둘 것
 
-- **시크릿이 없으면**: 평소엔 조용히 성공하지만, 이벤트가 터진 날 발송 단계에서 실패로 끝납니다. 이 경우 GitHub가 워크플로 실패 알림 메일을 보내주므로 그것이 최후의 신호가 됩니다. Actions 실행 화면 상단에 노란 경고("알림 시크릿 미설정")가 보이면 아직 설정이 안 된 상태입니다.
+- **알림 경로 확인**: Actions 실행 화면 상단 안내("알림 경로")에 현재 GitHub 이슈 알림인지 직접 메일인지 표시됩니다.
 - **60일 자동 비활성화**: GitHub는 저장소에 60일간 커밋이 없으면 예약 워크플로를 끕니다. 워크플로 마지막 단계(Keepalive)가 매 실행마다 스스로를 재활성화해 이를 막습니다. 만약 Actions 탭에 "This scheduled workflow is disabled" 배너가 보이면 **Enable workflow** 를 누르거나 아무 커밋이나 push 하면 다시 켜집니다.
 - **실행 시각 지연**: GitHub 예약 작업은 혼잡 시 1~2시간 늦게 돌 수 있습니다(보통 한국시간 오전 7~9시 사이). 하루 한 번만 돌면 되므로 문제 없습니다.
 
