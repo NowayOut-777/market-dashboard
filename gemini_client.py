@@ -18,7 +18,15 @@ _discovered: list = []
 
 
 class GeminiError(Exception):
-    """사용자에게 그대로 보여줘도 되는 짧은 한국어 메시지를 담는다 (키는 절대 포함하지 않음)."""
+    """사용자에게 그대로 보여줘도 되는 짧은 한국어 메시지를 담는다 (키는 절대 포함하지 않음).
+
+    transient=True면 시간이 지나면 풀리는 실패(한도, 장애, 연결)라 이전 결과를 대신 보여줘도 되고,
+    False면 키·권한 문제처럼 사람이 고쳐야 하는 실패라 숨기지 말고 드러내야 한다.
+    """
+
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 class _Retry(Exception):
@@ -36,8 +44,10 @@ def _error_message(r: requests.Response) -> str:
         return ""
 
 
-def _extract_text(data: dict) -> tuple:
-    for cand in data.get("candidates", []):
+def _extract_text(data) -> tuple:
+    if not isinstance(data, dict):
+        return "", False
+    for cand in data.get("candidates") or []:
         parts = cand.get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
         if text.strip():
@@ -77,7 +87,7 @@ def _call(model: str, headers: dict, body: dict, timeout: int) -> str:
         r = requests.post(f"{API_BASE}/models/{model}:generateContent",
                           headers=headers, json=body, timeout=timeout)
     except requests.RequestException:
-        raise GeminiError("Gemini 서버에 연결하지 못했습니다") from None
+        raise GeminiError("Gemini 서버에 연결하지 못했습니다", transient=True) from None
 
     code, msg = r.status_code, _error_message(r)
     # 구글 원문 오류에는 프로젝트 번호 등이 섞일 수 있어 공개 페이지에는 상태별 안내만 보여준다
@@ -115,8 +125,12 @@ def _call(model: str, headers: dict, body: dict, timeout: int) -> str:
 
 def generate(prompt: str, api_key: str, model: str = "", system: str = "",
              timeout: int = 60) -> str:
+    api_key = (api_key or "").strip()
     if not api_key:
         raise GeminiError("GEMINI_API_KEY가 설정되지 않았습니다")
+    # 복사할 때 섞인 공백·줄바꿈·전각/한글 문자는 헤더 인코딩에서 예외를 낸다 — 미리 막는다
+    if not api_key.isascii() or any(c.isspace() for c in api_key):
+        raise GeminiError("API 키에 공백이나 잘못된 문자가 섞여 있습니다 — 키를 다시 복사해 등록하세요")
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -144,6 +158,11 @@ def generate(prompt: str, api_key: str, model: str = "", system: str = "",
                 # '모델 없음'보다 한도·장애 사유가 사용자에게 더 유용하므로 덮어쓰지 않는다
                 if reason_is_missing or not e.model_missing:
                     reason, reason_is_missing = str(e), e.model_missing
+            except GeminiError:
+                raise
+            except Exception:
+                # 호출하는 쪽(알림 발송 등)이 Gemini 때문에 멈추지 않도록 전부 GeminiError로 바꾼다
+                raise GeminiError("Gemini 호출 중 예기치 못한 오류가 발생했습니다", transient=True) from None
         return ""
 
     if model:
@@ -152,4 +171,5 @@ def generate(prompt: str, api_key: str, model: str = "", system: str = "",
         text = attempt(DEFAULT_MODELS) or attempt(_discover_models(headers, timeout))
     if text:
         return text
-    raise GeminiError(reason)
+    # 모든 후보가 '모델 없음'이면 설정 문제, 그 외(한도·장애)는 시간이 지나면 풀린다
+    raise GeminiError(reason, transient=not reason_is_missing)

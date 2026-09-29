@@ -119,24 +119,29 @@ AI_PROMPT = """3대 지수의 200일 이동평균선 알림 데이터입니다 (
 
 
 def ai_commentary(results: list) -> str:
-    """GEMINI_API_KEY가 있으면 AI 해설 한 단락을 만든다. 없거나 실패하면 빈 문자열."""
-    api_key = os.getenv("GEMINI_API_KEY", "")
+    """GEMINI_API_KEY가 있으면 AI 해설 한 단락을 만든다. 없거나 실패하면 빈 문자열.
+
+    알림 발송이 AI 때문에 멈추면 안 되므로 어떤 예외도 밖으로 내보내지 않는다.
+    """
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return ""
-    data = [
-        {"지수": display_name(r), "종가": round(r["close"], 2), "200일선": round(r["ma200"], 2),
-         "이격률_%": round(r["gap_pct"], 2), "기준일": str(r["as_of"]),
-         "이벤트": [e.split(" ", 1)[1] for e in r["events"]] or "없음"}
-        for r in results
-    ]
     try:
+        data = [
+            {"지수": display_name(r), "종가": round(r["close"], 2), "200일선": round(r["ma200"], 2),
+             "이격률_%": round(r["gap_pct"], 2), "기준일": str(r["as_of"]),
+             "이벤트": [e.split(" ", 1)[1] for e in r["events"]] or "없음"}
+            for r in results
+        ]
         return gemini_generate(
             AI_PROMPT.format(data=json.dumps(data, ensure_ascii=False, indent=1)),
-            api_key, os.getenv("GEMINI_MODEL", ""), system=AI_SYSTEM,
+            api_key, os.getenv("GEMINI_MODEL", "").strip(), system=AI_SYSTEM,
         )
     except GeminiError as e:
         print(f"::warning::AI 해설 생략 — {e}")
-        return ""
+    except Exception as e:
+        print(f"::warning::AI 해설 생략 — 예기치 못한 오류 ({type(e).__name__})")
+    return ""
 
 
 def commentary_html(text: str) -> str:
@@ -217,8 +222,8 @@ def build_markdown(results: list, commentary: str = "") -> str:
         lines += [
             "",
             "#### 🤖 AI 해설 (Gemini)",
-            # GitHub 마크다운도 $...$를 수식으로 렌더링한다
-            commentary.replace("$", "\\$"),
+            # GitHub 마크다운도 $...$는 수식, ~...~는 취소선으로 렌더링한다
+            commentary.replace("$", "\\$").replace("~", "\\~"),
             "",
             "_AI가 생성한 해설로 틀릴 수 있으며 투자 권유가 아닙니다._",
         ]

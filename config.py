@@ -210,12 +210,13 @@ def get_app_password() -> str:
 
 
 def _get_secret(name: str) -> str:
-    value = os.getenv(name, "")
+    # 복사·붙여넣기로 딸려 온 앞뒤 공백·줄바꿈은 헤더 인코딩 오류를 일으킨다
+    value = os.getenv(name, "").strip()
     if value:
         return value
     try:
         import streamlit as st
-        return st.secrets.get(name, "")
+        return str(st.secrets.get(name, "")).strip()
     except Exception:
         return ""
 

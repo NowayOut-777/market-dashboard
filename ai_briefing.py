@@ -1,6 +1,7 @@
 """대시보드 상단 'AI 시장 브리핑' — 페이지에 이미 불러온 지표를 모아 Gemini에게 요약시킨다."""
 
 import json
+import threading
 import time
 
 import pandas as pd
@@ -17,6 +18,8 @@ FAIL_BACKOFF = 600
 # 공개 페이지라 누구나 새로고침(캐시 초기화)할 수 있다. 서버 전체 기준으로
 # Gemini 호출 간격을 강제해 무료 한도가 방문자에 의해 소진되지 않게 한다 (최대 96회/일).
 MIN_CALL_INTERVAL = 900
+# 일시 장애 때 이전 요약을 대신 보여주는 최대 기간 — 이보다 오래된 요약은 현재 지표와 어긋날 수 있다
+STALE_MAX = 3 * 3600
 
 SYSTEM = """너는 미국 증시 지표를 한국 개인투자자에게 쉽게 설명하는 시장 해설가다.
 규칙:
@@ -41,8 +44,9 @@ PROMPT = """아래는 오늘 대시보드 지표 스냅샷(JSON)입니다.
 
 각 항목은 1~2문장, 전체 500자 이내로 쓰세요."""
 
-_fail = {"until": 0.0, "msg": ""}
+_fail = {"until": 0.0, "msg": "", "transient": True}
 _last = {"at": 0.0, "text": ""}
+_lock = threading.Lock()
 
 
 def _last_two(series: pd.Series):
@@ -144,22 +148,42 @@ def _cached_briefing(snapshot_json: str, model: str, _api_key: str) -> str:
     return gemini_client.generate(PROMPT.format(data=snapshot_json), _api_key, model, system=SYSTEM)
 
 
-def get_briefing(api_key: str, model: str = "") -> str:
-    now = time.time()
-    if _last["text"] and now - _last["at"] < MIN_CALL_INTERVAL:
-        return _last["text"]
-    if now < _fail["until"]:
-        if _last["text"]:
-            return _last["text"]
-        raise gemini_client.GeminiError(_fail["msg"])
-    snapshot = json.dumps(build_snapshot(), ensure_ascii=False, sort_keys=True)
-    try:
-        text = _cached_briefing(snapshot, model, api_key)
-    except gemini_client.GeminiError as e:
-        _fail.update(until=now + FAIL_BACKOFF, msg=str(e))
-        if _last["text"]:
-            return _last["text"]
-        raise
-    # streamlit 마크다운은 $...$를 수식으로 렌더링한다
-    _last.update(at=now, text=text.replace("$", "\\$"))
-    return _last["text"]
+def escape_markdown(text: str) -> str:
+    # streamlit/GitHub 마크다운은 $...$를 수식으로, ~...~를 취소선으로 렌더링한다 ('1~2일' 등)
+    return text.replace("$", "\\$").replace("~", "\\~")
+
+
+def _result(stale: bool) -> dict:
+    return {"text": _last["text"], "at": _last["at"], "stale": stale}
+
+
+def get_briefing(api_key: str, model: str = "") -> dict:
+    """{"text": 요약, "at": 생성 시각(epoch), "stale": 최신 생성에 실패해 이전 요약을 보여주는지}"""
+    # 여러 방문자가 동시에 열어도 Gemini 호출은 한 번만 나가도록 직렬화한다
+    with _lock:
+        now = time.time()
+        has_recent = bool(_last["text"]) and now - _last["at"] < STALE_MAX
+        if _last["text"] and now - _last["at"] < MIN_CALL_INTERVAL:
+            return _result(stale=False)
+        if now < _fail["until"]:
+            if _fail["transient"] and has_recent:
+                return _result(stale=True)
+            raise gemini_client.GeminiError(_fail["msg"], transient=_fail["transient"])
+
+        snap = build_snapshot()
+        if not snap.get("3대 지수"):
+            # 지표를 못 불러온 상태로 요약하면 틀린 내용이 좋은 요약을 덮어쓴다
+            if has_recent:
+                return _result(stale=True)
+            raise gemini_client.GeminiError("지표를 아직 불러오지 못해 요약을 건너뜁니다", transient=True)
+
+        try:
+            text = _cached_briefing(json.dumps(snap, ensure_ascii=False, sort_keys=True), model, api_key)
+        except gemini_client.GeminiError as e:
+            _fail.update(until=now + FAIL_BACKOFF, msg=str(e), transient=e.transient)
+            # 키·권한 문제는 옛 요약 뒤에 숨기지 않고 드러낸다
+            if e.transient and has_recent:
+                return _result(stale=True)
+            raise
+        _last.update(at=now, text=escape_markdown(text))
+        return _result(stale=False)

@@ -842,14 +842,20 @@ def render_ai_briefing():
     if not api_key:
         return
     section_title("AI", "오늘의 AI 시장 브리핑")
+    brief = None
     with st.container(border=True):
         try:
             with st.spinner("Gemini가 오늘 지표를 요약하는 중…"):
-                text = ai_briefing.get_briefing(api_key, config.get_gemini_model())
-            st.markdown(text)
+                brief = ai_briefing.get_briefing(api_key, config.get_gemini_model())
+            st.markdown(brief["text"])
         except gemini_client.GeminiError as e:
             st.info(f"AI 브리핑을 불러오지 못했습니다 — {e}")
-    st.caption("Gemini가 이 페이지의 지표만 보고 작성한 요약입니다. 틀릴 수 있으며 투자 권유가 아닙니다 · 최대 15분 간격 갱신")
+    if brief:
+        mins = int((time.time() - brief["at"]) // 60)
+        age = "방금" if mins < 1 else (f"{mins}분 전" if mins < 60 else f"{mins // 60}시간 {mins % 60}분 전")
+        if brief["stale"]:
+            st.caption(f"⚠️ 최신 요약을 만들지 못해 {age}에 만든 이전 요약을 보여주고 있습니다.")
+        st.caption(f"Gemini가 이 페이지의 지표만 보고 작성한 요약입니다. 틀릴 수 있으며 투자 권유가 아닙니다 · {age} 생성 · 최대 15분 간격 갱신")
     st.divider()
 
 
