@@ -1,4 +1,5 @@
 import hmac
+import re
 import time
 import traceback
 
@@ -848,8 +849,17 @@ def render_ai_briefing():
             with st.spinner("Gemini가 오늘 지표를 요약하는 중…"):
                 brief = ai_briefing.get_briefing(api_key, config.get_gemini_model())
             st.markdown(brief["text"])
-        except gemini_client.GeminiError as e:
-            st.info(f"AI 브리핑을 불러오지 못했습니다 — {e}")
+        except Exception as e:
+            if _is_streamlit_control_flow(e):
+                raise
+            brief = None
+            # 모듈 재로딩 뒤엔 클래스 객체가 달라 isinstance가 빗나갈 수 있어 이름으로도 확인한다
+            if type(e).__name__ == "GeminiError":
+                st.info(f"AI 브리핑을 불러오지 못했습니다 — {e}")
+            else:
+                _log_error("AI 브리핑 오류")
+                detail = re.sub(r"AIza[0-9A-Za-z_\-]{10,}", "***", str(e))[:160]
+                st.info(f"AI 브리핑을 불러오지 못했습니다 — 일시 오류 ({type(e).__name__}: {detail})")
     if brief:
         mins = int((time.time() - brief["at"]) // 60)
         age = "방금" if mins < 1 else (f"{mins}분 전" if mins < 60 else f"{mins // 60}시간 {mins % 60}분 전")
