@@ -175,24 +175,40 @@ def create_github_issue(title: str, body: str) -> None:
         "X-GitHub-Api-Version": "2022-11-28",
     }
     api = f"https://api.github.com/repos/{repo}"
-    # 라벨이 이미 있으면 422 — 무시해도 된다
-    requests.post(
-        f"{api}/labels", headers=headers, timeout=20,
-        json={"name": ALERT_LABEL, "color": "d12d3a", "description": "200일선 알림"},
-    )
-    r = requests.post(
-        f"{api}/issues", headers=headers, timeout=20,
-        json={
-            "title": title,
-            "body": f"{body}\n\ncc @{owner}",
-            "assignees": [owner],
-            "labels": [ALERT_LABEL],
-        },
-    )
+    try:
+        # 라벨이 이미 있으면 422 — 무시해도 된다
+        requests.post(
+            f"{api}/labels", headers=headers, timeout=20,
+            json={"name": ALERT_LABEL, "color": "d12d3a", "description": "200일선 알림"},
+        )
+    except requests.RequestException as e:
+        print(f"::warning::라벨 생성 건너뜀: {e}")
+    try:
+        r = requests.post(
+            f"{api}/issues", headers=headers, timeout=20,
+            json={
+                "title": title,
+                # 소유자 알림 메일은 이 @멘션으로 발생한다 (실측: 알림 사유 reason=mention)
+                "body": f"{body}\n\ncc @{owner}",
+                "assignees": [owner],
+                "labels": [ALERT_LABEL],
+            },
+        )
+    except requests.RequestException as e:
+        print(f"::error::GitHub 이슈 생성 실패: {e}")
+        sys.exit(1)
     if r.status_code >= 300:
         print(f"::error::GitHub 이슈 생성 실패 ({r.status_code}): {r.text}")
         sys.exit(1)
-    print(f"GitHub 이슈 알림 발송 완료 → {r.json().get('html_url')} (담당자 @{owner}, 계정 이메일로 전달)")
+    print(f"GitHub 이슈 알림 발송 완료 → {r.json().get('html_url')} "
+          f"(@{owner} 멘션 — GitHub 알림 메일로 전달, 수 분 지연 가능)")
+
+
+def write_step_summary(markdown: str) -> None:
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(markdown + "\n")
 
 
 def send_alert(results: list, triggered: list) -> None:
@@ -204,6 +220,8 @@ def send_alert(results: list, triggered: list) -> None:
         print("Subject:", subject)
         print(markdown)
         return
+
+    write_step_summary(markdown)
 
     to_addr = os.getenv("ALERT_EMAIL_TO", "")
     has_email_sender = bool(os.getenv("RESEND_API_KEY")) or bool(

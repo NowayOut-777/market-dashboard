@@ -35,8 +35,9 @@ jobs:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
-          if [ -n "$ALERT_EMAIL_TO" ] && { [ -n "$RESEND_API_KEY" ] || [ -n "$SMTP_USER" ]; }; then
+          if [ -n "$ALERT_EMAIL_TO" ] && { [ -n "$RESEND_API_KEY" ] || { [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; }; }; then
             echo "::notice title=알림 경로::직접 메일 발송 (Resend/SMTP)"
           else
             echo "::notice title=알림 경로::GitHub 이슈 알림 — 소유자 계정 이메일로 전달됨 (메일 키 불필요)"
