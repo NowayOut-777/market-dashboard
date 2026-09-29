@@ -207,6 +207,17 @@ GitHub 알림 대신 표가 들어간 HTML 메일을 원하면 저장소 **Setti
 
 ---
 
+## 💤 앱 잠들지 않게 하기 (GitHub Actions)
+
+Streamlit Community Cloud 무료 플랜은 방문이 한동안(약 12시간) 없으면 앱을 재웁니다. `.github/workflows/keep-awake.yml` 이 **6시간마다** 헤드리스 크롬으로 대시보드를 열고, 잠들어 있으면 깨우기 버튼을 눌러 줍니다. 덕분에 친구들이 언제 들어와도 "Zzzz" 화면 없이 바로 보입니다.
+
+- 단순 주소 호출(curl)은 방문으로 집계되지 않아 실제 브라우저를 씁니다.
+- 앱 화면을 확인하지 못하면 실행이 실패로 끝나고 GitHub가 실패 알림 메일을 보냅니다 — 대시보드가 다운됐다는 신호입니다.
+- 수동 실행: 저장소 **Actions → Keep App Awake → Run workflow**
+- 끄고 싶으면 같은 화면에서 **Disable workflow**.
+
+---
+
 ## 🛑 보안 체크리스트
 
 - [x] `.streamlit/secrets.toml`은 `.gitignore` 등록 — 절대 커밋 금지
@@ -227,6 +238,7 @@ Claude_test5/
 ├── gemini_client.py        # Gemini API 호출 (대시보드·알림 공용)
 ├── ai_briefing.py          # 대시보드 AI 브리핑 (지표 스냅샷 → 요약)
 ├── scripts/check_ma200.py  # 200일선 알림 (GitHub Actions에서 실행)
+├── scripts/keep_awake.py   # 앱 잠들지 않게 주기적 방문
 ├── .github/workflows/      # 알림 스케줄
 ├── requirements.txt        # Python 의존성 (Streamlit Cloud 빌드 입력)
 ├── .python-version         # Python 버전 핀

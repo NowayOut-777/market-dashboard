@@ -1,0 +1,38 @@
+name: Keep App Awake
+
+on:
+  schedule:
+    # 6시간마다 (UTC 00:23/06:23/12:23/18:23 = 한국시간 09:23/15:23/21:23/03:23)
+    # Community Cloud는 약 12시간 무방문 시 앱을 재우므로, GitHub 예약 지연(최대 1~2시간)을 감안해도 여유가 있다
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install headless browser
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit dashboard (wake up if sleeping)
+        run: python scripts/keep_awake.py
+
+      # GitHub는 저장소에 60일간 커밋이 없으면 예약 워크플로를 자동으로 끈다 — 매 실행마다 재활성화
+      - name: Keepalive — 60일 비활성화 방지
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable keep-awake.yml --repo "$GITHUB_REPOSITORY"
