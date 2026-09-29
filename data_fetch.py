@@ -134,7 +134,16 @@ def _cached_fear_greed() -> dict:
             fg = data.get("fear_and_greed") if isinstance(data, dict) else None
             if not isinstance(fg, dict) or fg.get("score") is None or not fg.get("rating"):
                 raise ValueError("CNN 응답 형식 불완전")
+            components = {}
+            for comp_key in config.FEAR_GREED_COMPONENTS:
+                comp = data.get(comp_key)
+                if isinstance(comp, dict) and isinstance(comp.get("score"), (int, float)):
+                    components[comp_key] = {
+                        "score": float(comp["score"]),
+                        "rating": str(comp.get("rating") or ""),
+                    }
             return {
+                "components": components,
                 "score": float(fg["score"]),
                 "rating": str(fg["rating"]),
                 "previous_close": fg.get("previous_close"),
@@ -207,6 +216,39 @@ def fetch_fred_series(series_id: str, api_key: str, days: int = 120) -> pd.DataF
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_multi_close(tickers: tuple, period: str) -> pd.DataFrame:
+    last_err = ""
+    for attempt in range(3):
+        try:
+            # 섹터 11개를 한 번의 요청으로 받는다 — 티커별로 따로 받으면 콜드 스타트 요청이 몰린다
+            df = yf.download(list(tickers), period=period, auto_adjust=False,
+                             progress=False, threads=False)
+            closes = df["Close"] if "Close" in df else pd.DataFrame()
+            if isinstance(closes, pd.Series):
+                closes = closes.to_frame(tickers[0])
+            closes = closes.dropna(how="all")
+            if not closes.empty:
+                return closes
+        except Exception as e:
+            last_err = str(e)
+        if attempt < 2:
+            time.sleep(0.8 * (attempt + 1))
+    raise FetchError(last_err or "일괄 조회 결과 없음")
+
+
+def fetch_multi_close(tickers: tuple, period: str = "1y") -> pd.DataFrame:
+    """여러 티커의 종가를 열(column)=티커 형태로 돌려준다. 실패하면 빈 DataFrame."""
+    key = ("multi", tickers, period)
+    if _failed_recently(key):
+        return pd.DataFrame()
+    try:
+        return _cached_multi_close(tickers, period)
+    except Exception:
+        _mark_failed(key)
+        return pd.DataFrame()
+
+
 def now_kst_str() -> str:
     try:
         from zoneinfo import ZoneInfo
@@ -214,3 +256,50 @@ def now_kst_str() -> str:
     except Exception:
         tz = timezone(timedelta(hours=9))
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M KST")
+
+
+def fetch_macro(fred_key: str) -> dict:
+    """경기·금리 곡선 지표. 대시보드와 AI 브리핑이 같은 캐시를 공유한다."""
+    fs = config.FRED_SERIES
+    return {
+        # 금리차는 '최근 1년 내 역전 여부'까지 보려고 길게 받는다
+        "t10y2y": fetch_fred_series(fs["t10y2y"], fred_key, days=400),
+        "t10y3m": fetch_fred_series(fs["t10y3m"], fred_key, days=400),
+        "fed_funds": fetch_fred_series(fs["fed_funds"], fred_key),
+        "cpi": fetch_fred_series(fs["cpi"], fred_key, days=30),
+        "unemployment": fetch_fred_series(fs["unemployment"], fred_key, days=30),
+        "sahm": fetch_fred_series(fs["sahm"], fred_key, days=30),
+    }
+
+
+def cpi_yoy(cpi_df: pd.DataFrame) -> pd.Series:
+    """월별 CPI 지수 → 전년 동월 대비 상승률(%) 시계열."""
+    if cpi_df.empty:
+        return pd.Series(dtype=float)
+    s = cpi_df.set_index("date")["value"]
+    return ((s / s.shift(12) - 1) * 100).dropna()
+
+
+def sector_returns(periods) -> pd.DataFrame:
+    """섹터 ETF별 기간 수익률(%)과 200일선 대비(%). periods = ((라벨, 거래일 수), ...)"""
+    tickers = tuple(config.SECTOR_ETFS.values())
+    closes = fetch_multi_close(tickers, period="1y")
+    if closes.empty:
+        return pd.DataFrame()
+    names = {t: n for n, t in config.SECTOR_ETFS.items()}
+    longest = max(n for _, n in periods)
+    rows = []
+    for t in tickers:
+        if t not in closes:
+            continue
+        s = closes[t].dropna()
+        if len(s) <= longest:
+            continue
+        row = {"섹터": f"{names[t]} ({t})"}
+        for label, n in periods:
+            row[label] = (float(s.iloc[-1]) / float(s.iloc[-1 - n]) - 1) * 100
+        if len(s) >= config.MA_WINDOW:
+            ma = float(s.rolling(config.MA_WINDOW).mean().iloc[-1])
+            row["200일선 대비"] = (float(s.iloc[-1]) / ma - 1) * 100
+        rows.append(row)
+    return pd.DataFrame(rows)

@@ -37,12 +37,13 @@ PROMPT = """아래는 오늘 대시보드 지표 스냅샷(JSON)입니다.
 
 **한 줄 요약:** (지금 시장 분위기를 한 문장으로)
 
-- **주식:** (3대 지수의 200일선 대비 위치, 공포탐욕지수)
+- **주식:** (3대 지수의 200일선 대비 위치, 공포탐욕지수와 눈에 띄는 구성지표, 섹터 흐름)
 - **위험 신호:** (VIX, MOVE, 하이일드 스프레드, 10년물 금리 중 눈여겨볼 점)
-- **원자재·달러:** (눈에 띄는 움직임)
-- **지켜볼 포인트:** (경계선에 가까운 지표가 있다면 무엇이 얼마나 가까운지)
+- **경기:** (장단기 금리차, 삼의 법칙, 물가·고용이 말해주는 경기 사이클)
+- **원자재·환율:** (유가·금·달러·원/달러 환율의 눈에 띄는 움직임)
+- **지켜볼 포인트:** ('경계선에 가까운 지표' 목록의 앞쪽 1~2개를 수치와 함께. 이미 안전한 판단을 반복하지 말 것)
 
-각 항목은 1~2문장, 전체 500자 이내로 쓰세요."""
+각 항목은 1~2문장, 전체 600자 이내로 쓰세요."""
 
 _fail = {"until": 0.0, "msg": "", "transient": True}
 _last = {"at": 0.0, "text": ""}
@@ -136,10 +137,95 @@ def build_snapshot() -> dict:
         info = dfetch.fetch_latest_price(ticker)
         if info:
             commodities[name] = {"가격": round(info["price"], 2), "전일대비_%": round(info["change_pct"], 2)}
-    snap["원자재·달러"] = commodities
+    snap["원자재·달러·환율"] = commodities
+
+    m = dfetch.fetch_macro(fred_key)
+    macro = {}
+    for key, label in (("t10y2y", "장단기 금리차 10Y-2Y(%p)"), ("t10y3m", "장단기 금리차 10Y-3M(%p)"),
+                       ("fed_funds", "연준 기준금리(%)"), ("unemployment", "실업률(%)"),
+                       ("sahm", "삼의 법칙(%p, 0.5 이상이면 침체 신호)")):
+        if not m[key].empty:
+            macro[label] = round(float(m[key]["value"].iloc[-1]), 2)
+    yoy = dfetch.cpi_yoy(m["cpi"])
+    if not yoy.empty:
+        macro["CPI 전년비(%)"] = round(float(yoy.iloc[-1]), 2)
+    snap["경기·금리곡선"] = macro
+    if not m["t10y2y"].empty and not m["t10y3m"].empty and not m["sahm"].empty:
+        cs = risk.interpret_yield_curve(m["t10y2y"]["value"], m["t10y3m"]["value"])
+        ss = risk.interpret_sahm(m["sahm"]["value"])
+        signals["장단기 금리차"] = cs.headline
+        signals["삼의 법칙"] = ss.headline
+        signals["경기 사이클"] = risk.combine_cycle(cs, ss).headline
+
+    sectors = dfetch.sector_returns((("1개월", 21),))
+    if not sectors.empty:
+        ranked = sectors.sort_values("1개월", ascending=False)
+        entry = {
+            "1개월 상위": [f"{r['섹터']} {r['1개월']:+.1f}%" for _, r in ranked.head(3).iterrows()],
+            "1개월 하위": [f"{r['섹터']} {r['1개월']:+.1f}%" for _, r in ranked.tail(3).iterrows()],
+        }
+        if "200일선 대비" in sectors:
+            valid = sectors["200일선 대비"].dropna()
+            entry["200일선 위 섹터 수"] = f"{int((valid > 0).sum())}/{len(valid)}"
+        snap["섹터(11개 SPDR ETF)"] = entry
+
+    if fg and "error" not in fg and fg.get("components"):
+        snap["공포탐욕 구성지표(0~100)"] = {
+            config.FEAR_GREED_COMPONENTS[k]: round(v["score"]) for k, v in fg["components"].items()
+            if k in config.FEAR_GREED_COMPONENTS
+        }
 
     snap["대시보드 규칙 판단"] = signals
+    snap["경계선에 가까운 지표(가까운 순)"] = _watch_points(snap, y, h, m)
     return snap
+
+
+def _next_threshold(value: float, levels) -> tuple:
+    """value 위쪽으로 가장 가까운 경계값과 그 거리. 모든 경계를 넘었으면 (None, None)."""
+    for lv in levels:
+        if value < lv:
+            return lv, lv - value
+    return None, None
+
+
+def _watch_points(snap: dict, y: pd.DataFrame, h: pd.DataFrame, m: dict, limit: int = 4) -> list:
+    # (상대 거리, 설명) — 상대 거리 = 경계까지 남은 폭 / 지표별 '의미 있는 변동폭'
+    cands = []
+    for name, e in snap.get("3대 지수", {}).items():
+        gap = e.get("200일선대비_%")
+        if gap is not None:
+            side = "하향 이탈" if gap > 0 else "상향 회복"
+            cands.append((abs(gap) / 5, f"{name}: 200일선 대비 {gap:+.2f}% — 0%가 되면 200일선 {side}"))
+    vol = snap.get("변동성 지수", {})
+    for name, levels, scale in (("VIX", (15, 20, 30, 40), 5), ("MOVE", (80, 110, 140), 20)):
+        if name in vol:
+            lv, dist = _next_threshold(vol[name]["현재"], levels)
+            if lv is not None:
+                cands.append((dist / scale, f"{name}: {vol[name]['현재']:.2f} — 다음 경계선 {lv}까지 {dist:.1f}"))
+    if not h.empty:
+        v = float(h["value"].iloc[-1])
+        lv, dist = _next_threshold(v, (3.5, 5.0, 7.0))
+        if lv is not None:
+            cands.append((dist / 0.75, f"하이일드 스프레드: {v:.2f}% — 다음 경계선 {lv}%까지 {dist:.2f}%p"))
+    if len(y) >= 6:
+        change = (float(y["value"].iloc[-1]) - float(y["value"].iloc[-6])) * 100
+        room = 30 - abs(change)
+        cands.append((max(room, 0) / 15, f"10년물 금리: 5일 변동 {change:+.0f}bp — ±30bp를 넘으면 급변 신호"))
+    for key, label in (("t10y2y", "10Y-2Y 금리차"), ("t10y3m", "10Y-3M 금리차")):
+        if not m[key].empty:
+            v = float(m[key]["value"].iloc[-1])
+            cands.append((abs(v) / 0.5, f"{label}: {v:+.2f}%p — 0 아래로 내려가면 역전"))
+    if not m["sahm"].empty:
+        v = float(m["sahm"]["value"].iloc[-1])
+        if v < 0.5:
+            cands.append(((0.5 - v) / 0.25, f"삼의 법칙: {v:+.2f}%p — 0.5%p에 닿으면 침체 신호"))
+    fg = snap.get("CNN 공포탐욕지수(0~100)")
+    if fg:
+        score = fg["현재"]
+        nearest = min((25, 45, 55, 75), key=lambda b: abs(score - b))
+        cands.append((abs(score - nearest) / 10, f"공포탐욕지수: {score:.1f} — 구간 경계 {nearest}까지 {abs(score - nearest):.1f}"))
+    cands.sort(key=lambda c: c[0])
+    return [text for _, text in cands[:limit]]
 
 
 @st.cache_data(ttl=BRIEFING_TTL, show_spinner=False, max_entries=8)

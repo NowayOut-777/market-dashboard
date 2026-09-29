@@ -1,4 +1,5 @@
 import hmac
+import html
 import re
 import time
 import traceback
@@ -295,6 +296,19 @@ def render_theme_css():
         }
         .kbh-section-title h2 { margin: 0 !important; }
         .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+        .fg-comps { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+        .fg-row { display: grid; grid-template-columns: minmax(150px, 2.2fr) 3fr minmax(110px, 1fr);
+                  align-items: center; gap: 12px; }
+        .fg-name { font-size: 13px; color: var(--ink-2); }
+        .fg-bar { height: 10px; background: var(--surface-2); border: 1px solid var(--border);
+                  border-radius: 999px; overflow: hidden; }
+        .fg-fill { height: 100%; border-radius: 999px; }
+        .fg-val { font-size: 13px; color: var(--ink-1); text-align: right; }
+        @media (max-width: 640px) {
+            .fg-row { grid-template-columns: 1fr 1fr; }
+            .fg-bar { grid-column: 1 / -1; order: 3; }
+        }
 
         [data-testid="stVerticalBlockBorderWrapper"] {
             background: var(--surface);
@@ -605,9 +619,38 @@ def render_section_fear_greed():
             if fg.get("previous_1_year") is not None:
                 st.markdown(f"- 1년 전: `{float(fg['previous_1_year']):.1f}`")
             st.caption("0~25 극단적 공포 / 25~45 공포 / 45~55 중립 / 55~75 탐욕 / 75~100 극단적 탐욕")
+        comps = fg.get("components") or {}
+        if comps:
+            st.markdown("**구성 지표 7개** — 공포탐욕지수는 아래 지표를 평균한 값입니다 (0 극단적 공포 ↔ 100 극단적 탐욕)")
+            st.markdown(fear_greed_components_html(comps), unsafe_allow_html=True)
     else:
         err = fg.get("error", "알 수 없는 오류") if fg else "응답 없음"
         st.warning(f"공포탐욕지수 조회 실패: {err}")
+
+
+def fear_greed_color(score: float) -> str:
+    for upper, color in ((25, "#d12d3a"), (45, "#e8744f"), (55, "#fbc02d"), (75, "#7ba2f7")):
+        if score < upper:
+            return color
+    return "#1a8d4a"
+
+
+def fear_greed_components_html(comps: dict) -> str:
+    rows = []
+    for key, label in config.FEAR_GREED_COMPONENTS.items():
+        comp = comps.get(key)
+        if not comp:
+            continue
+        score = max(0.0, min(100.0, comp["score"]))
+        rating = RATING_KOR.get(comp["rating"].lower(), comp["rating"])
+        rows.append(
+            "<div class='fg-row'>"
+            f"<div class='fg-name'>{html.escape(label)}</div>"
+            f"<div class='fg-bar'><div class='fg-fill' style='width:{score:.0f}%;background:{fear_greed_color(score)}'></div></div>"
+            f"<div class='fg-val num'>{score:.0f} · {html.escape(rating)}</div>"
+            "</div>"
+        )
+    return "<div class='fg-comps'>" + "".join(rows) + "</div>"
 
 
 # =========================
@@ -626,7 +669,7 @@ def render_section_volatility():
 # 4. Bonds & Commodities
 # =========================
 def render_section_bonds():
-    section_title(4, "채권 & 원자재")
+    section_title(4, "채권 · 원자재 · 환율")
     fred_key = config.get_fred_api_key()
     yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
     hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
@@ -665,10 +708,86 @@ def render_section_bonds():
 
 
 # =========================
-# 5. Risk Interpretation
+# 5. Macro & Yield Curve
+# =========================
+def macro_metric(label: str, series: pd.Series, dates: pd.Series, unit: str, fred_key: str,
+                 delta_scale: float = 100, delta_unit: str = "bp", delta_color: str = "off",
+                 lag: int = 1, note: str = ""):
+    s = series.dropna()
+    if s.empty:
+        st.metric(label, "데이터 없음")
+        st.caption(fred_caption(fred_key))
+        return
+    last = float(s.iloc[-1])
+    delta = None
+    if len(s) > lag:
+        change = (last - float(s.iloc[-1 - lag])) * delta_scale
+        delta = f"{change:+.0f}{delta_unit}" if delta_unit == "bp" else f"{change:+.2f}{delta_unit}"
+    st.metric(label, f"{last:+.2f}{unit}" if unit == "%p" else f"{last:.2f}{unit}",
+              delta=delta, delta_color=delta_color)
+    st.caption(" · ".join(x for x in (f"기준일: {pd.Timestamp(dates.iloc[-1]).strftime('%Y-%m-%d')}", note) if x))
+
+
+def render_section_macro():
+    section_title(5, "경기 & 금리 곡선 — 침체 선행 지표")
+    fred_key = config.get_fred_api_key()
+    m = dfetch.fetch_macro(fred_key)
+
+    row1 = st.columns(3)
+    with row1[0]:
+        df = m["t10y2y"]
+        macro_metric("장단기 금리차 10Y-2Y", df["value"] if not df.empty else pd.Series(dtype=float),
+                     df["date"] if not df.empty else None, "%p", fred_key, lag=21, note="1개월 변화 · 음수=역전")
+    with row1[1]:
+        df = m["t10y3m"]
+        macro_metric("장단기 금리차 10Y-3M", df["value"] if not df.empty else pd.Series(dtype=float),
+                     df["date"] if not df.empty else None, "%p", fred_key, lag=21, note="1개월 변화 · 음수=역전")
+    with row1[2]:
+        df = m["fed_funds"]
+        macro_metric("연준 기준금리 (실효)", df["value"] if not df.empty else pd.Series(dtype=float),
+                     df["date"] if not df.empty else None, "%", fred_key, lag=21, note="1개월 변화")
+
+    row2 = st.columns(3)
+    with row2[0]:
+        yoy = dfetch.cpi_yoy(m["cpi"]) if len(m["cpi"]) > 13 else pd.Series(dtype=float)
+        macro_metric("소비자물가 CPI (전년비)", yoy, pd.Series(yoy.index) if not yoy.empty else None, "%",
+                     fred_key, delta_scale=1, delta_unit="%p", delta_color="inverse", note="전월 대비 변화")
+    with row2[1]:
+        df = m["unemployment"]
+        macro_metric("실업률", df["value"] if not df.empty else pd.Series(dtype=float),
+                     df["date"] if not df.empty else None, "%", fred_key,
+                     delta_scale=1, delta_unit="%p", delta_color="inverse", note="전월 대비 변화")
+    with row2[2]:
+        df = m["sahm"]
+        macro_metric("삼의 법칙 (침체 지표)", df["value"] if not df.empty else pd.Series(dtype=float),
+                     df["date"] if not df.empty else None, "%p", fred_key,
+                     delta_scale=1, delta_unit="%p", delta_color="inverse", note="0.5%p 이상이면 침체 신호")
+
+    s2, s3 = m["t10y2y"], m["t10y3m"]
+    if not s2.empty or not s3.empty:
+        fig = go.Figure()
+        for df, name, color in ((s2, "10Y-2Y", line_color()), (s3, "10Y-3M", "#e8744f")):
+            if not df.empty:
+                fig.add_trace(go.Scatter(x=df["date"], y=df["value"], name=name, line=dict(width=2, color=color)))
+        fig.add_hline(y=0, line_dash="dot", line_width=1, line_color="#d12d3a",
+                      annotation_text="0 아래 = 역전", annotation_position="bottom right", opacity=0.7)
+        fig.update_layout(
+            **plotly_layout(),
+            height=240, margin=dict(l=10, r=10, t=10, b=10),
+            showlegend=True, legend=dict(orientation="h", y=-0.2),
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=True, gridcolor=grid_color(), ticksuffix="%p"),
+        )
+        st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+    st.caption("장단기 금리차가 음수(역전)가 되면 채권시장이 경기 둔화를 예상한다는 뜻으로, 과거 미국 경기침체에 "
+               "6~18개월 앞서 나타났습니다. 삼의 법칙은 실업률이 빠르게 오를 때 켜지는 침체 초기 신호입니다.")
+
+
+# =========================
+# 6. Risk Interpretation
 # =========================
 def render_section_risk():
-    section_title(5, "시장 위험 해석 (10Y · HY 스프레드 · VIX · MOVE)")
+    section_title(6, "시장 위험 해석 (금리 · 신용 · 변동성 · 경기)")
     fred_key = config.get_fred_api_key()
     yield_df = dfetch.fetch_fred_series(config.FRED_SERIES["us_10y"], fred_key)
     hy_df = dfetch.fetch_fred_series(config.FRED_SERIES["hy_spread"], fred_key)
@@ -709,10 +828,33 @@ def render_section_risk():
             st.markdown(f"**{move_sig.headline}**")
             st.write(move_sig.detail)
 
+    m = dfetch.fetch_macro(fred_key)
+    cycle = None
+    if not m["t10y2y"].empty and not m["t10y3m"].empty and not m["sahm"].empty:
+        curve_sig = risk.interpret_yield_curve(m["t10y2y"]["value"], m["t10y3m"]["value"])
+        sahm_sig = risk.interpret_sahm(m["sahm"]["value"])
+        cycle = risk.combine_cycle(curve_sig, sahm_sig)
+        ccols = st.columns(2)
+        with ccols[0]:
+            st.markdown(f"#### {curve_sig.icon} 장단기 금리차")
+            st.markdown(f"**{curve_sig.headline}**")
+            st.write(curve_sig.detail)
+        with ccols[1]:
+            st.markdown(f"#### {sahm_sig.icon} 삼의 법칙 (고용)")
+            st.markdown(f"**{sahm_sig.headline}**")
+            st.write(sahm_sig.detail)
+
     st.markdown("---")
-    st.markdown(f"### {combined.icon} 종합 판단 (10Y + HY)")
-    st.markdown(f"**{combined.headline}**")
-    st.write(combined.detail)
+    jcols = st.columns(2)
+    with jcols[0]:
+        st.markdown(f"### {combined.icon} 금융시장 판단 (10Y + HY)")
+        st.markdown(f"**{combined.headline}**")
+        st.write(combined.detail)
+    if cycle:
+        with jcols[1]:
+            st.markdown(f"### {cycle.icon} 경기 사이클 판단")
+            st.markdown(f"**{cycle.headline}**")
+            st.write(cycle.detail)
 
     with st.expander("🧭 해석 임계치 가이드"):
         st.markdown("""
@@ -744,11 +886,77 @@ def render_section_risk():
 - 🟡 80~110: 정상
 - 🟠 110~140: 경계 (통화정책 불확실성·인플레이션 우려)
 - 🔴 140+: 채권시장 스트레스 (2022~2023 SVB 사태급)
+
+**장단기 금리차 (10Y-2Y, 10Y-3M)**
+- 🟢 둘 다 양수: 정상 (우상향 곡선)
+- 🟠 하나라도 음수: 역전 — 과거 침체에 6~18개월 선행
+- 🟠 최근 1년 내 한 달 이상 역전됐다가 양수로 복귀: 역전 해소 직후 — 과거 침체가 자주 시작된 시점
+
+**삼의 법칙 (실업률 3개월 평균 − 직전 12개월 최저)**
+- 🟢 < 0.3%p: 안정
+- 🟠 0.3~0.5%p: 상승 중
+- 🔴 ≥ 0.5%p: 침체 신호 발동
 """)
 
 
 # =========================
-# 6. Sector / Stock Tracker
+# 7. Sector Heatmap & Breadth
+# =========================
+SECTOR_PERIODS = (("1일", 1), ("1주", 5), ("1개월", 21), ("3개월", 63))
+
+
+def render_section_sectors():
+    section_title(7, "섹터 히트맵 & 시장 폭")
+    df = dfetch.sector_returns(SECTOR_PERIODS)
+    if df.empty:
+        st.warning("섹터 데이터를 불러오지 못했습니다 — 잠시 후 새로고침해 주세요.")
+        return
+    df = df.sort_values("1개월", ascending=False).reset_index(drop=True)
+
+    has_ma = "200일선 대비" in df and df["200일선 대비"].notna().any()
+    kcols = st.columns(3)
+    with kcols[0]:
+        if has_ma:
+            valid = df["200일선 대비"].dropna()
+            above = int((valid > 0).sum())
+            total = int(len(valid))
+            st.metric("200일선 위 섹터", f"{above} / {total}")
+            ratio = above / total if total else 0
+            st.caption("🟢 상승이 넓게 퍼짐 (건강)" if ratio >= 0.7
+                       else "🟡 혼조 — 일부 섹터만 강세" if ratio >= 0.4
+                       else "🔴 약세가 넓게 퍼짐")
+    with kcols[1]:
+        top = df.iloc[0]
+        st.metric("1개월 주도 섹터", top["섹터"].split(" (")[0], delta=f"{top['1개월']:+.2f}%")
+    with kcols[2]:
+        bottom = df.iloc[-1]
+        st.metric("1개월 부진 섹터", bottom["섹터"].split(" (")[0], delta=f"{bottom['1개월']:+.2f}%")
+
+    cols = [label for label, _ in SECTOR_PERIODS] + (["200일선 대비"] if has_ma else [])
+    values = df[cols]
+    # 기간마다 수익률 크기가 달라(1일 ±1%, 3개월 ±15%) 색은 열별로 정규화하고 글자는 실제 값을 보여준다
+    scale = values.abs().max().replace(0, 1)
+    z = (values / scale).fillna(0).values
+    text = values.apply(lambda col: col.map(lambda v: "" if pd.isna(v) else f"{v:+.1f}%")).values
+    neutral = "#1f2630" if st.session_state.dark_mode else "#f3f5f8"
+    fig = go.Figure(go.Heatmap(
+        z=z, x=cols, y=df["섹터"], text=text, texttemplate="%{text}",
+        textfont=dict(family="JetBrains Mono", size=12),
+        colorscale=[[0, "#d12d3a"], [0.5, neutral], [1, "#1a8d4a"]], zmin=-1, zmax=1,
+        showscale=False, hoverinfo="skip", xgap=3, ygap=3,
+    ))
+    fig.update_layout(
+        **plotly_layout(),
+        height=40 * len(df) + 60, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(side="top", showgrid=False),
+        yaxis=dict(autorange="reversed", showgrid=False),
+    )
+    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
+    st.caption("1개월 수익률 순으로 정렬 · 색 진하기는 같은 열 안에서 비교한 상대 강도 · 섹터 ETF(SPDR) 기준")
+
+
+# =========================
+# 8. Sector / Stock Tracker
 # =========================
 def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = ""):
     cols = st.columns([1, 2.4])
@@ -813,7 +1021,7 @@ def render_picker_chart(group: dict, default_idx: int = 0, key_prefix: str = "")
 
 
 def render_section_tracker():
-    section_title(6, "섹터 · 종목 트래커")
+    section_title(8, "섹터 · 종목 트래커")
     tabs = st.tabs(["섹터 ETF", "Magnificent 7", "반도체", "섹터별 대형주"])
     with tabs[0]:
         render_picker_chart(config.SECTOR_ETFS, default_idx=7, key_prefix="sec")
@@ -882,9 +1090,13 @@ _safe_section("공포탐욕지수", render_section_fear_greed)
 st.divider()
 _safe_section("변동성 지수", render_section_volatility)
 st.divider()
-_safe_section("채권 & 원자재", render_section_bonds)
+_safe_section("채권 · 원자재 · 환율", render_section_bonds)
+st.divider()
+_safe_section("경기 & 금리 곡선", render_section_macro)
 st.divider()
 _safe_section("시장 위험 해석", render_section_risk)
+st.divider()
+_safe_section("섹터 히트맵 & 시장 폭", render_section_sectors)
 st.divider()
 _safe_section("섹터 · 종목 트래커", render_section_tracker)
 

@@ -12,6 +12,7 @@ COMMODITIES_FX = {
     "Gold (선물)": "GC=F",
     "Silver (선물)": "SI=F",
     "달러 인덱스 (DXY)": "DX-Y.NYB",
+    "원/달러 환율": "KRW=X",
 }
 
 VOLATILITY_INDICES = {
@@ -173,6 +174,27 @@ MOVE_LEVELS = {
 FRED_SERIES = {
     "us_10y": "DGS10",
     "hy_spread": "BAMLH0A0HYM2",
+    "t10y2y": "T10Y2Y",        # 10년물 - 2년물 금리차 (일별)
+    "t10y3m": "T10Y3M",        # 10년물 - 3개월물 금리차 (일별)
+    "fed_funds": "DFF",        # 실효 연방기금금리 (일별)
+    "cpi": "CPIAUCSL",         # 소비자물가지수 (월별, 전년비 계산)
+    "unemployment": "UNRATE",  # 실업률 (월별)
+    "sahm": "SAHMREALTIME",    # 삼의 법칙 경기침체 지표 (월별)
+}
+
+# 장단기 금리 역전(음수) 후 1년 안에 정상화된 구간도 과거 침체 직전과 겹친 경우가 많아 따로 본다
+YIELD_CURVE_LOOKBACK_DAYS = 252
+# 삼의 법칙: 실업률 3개월 평균이 직전 12개월 최저치보다 0.5%p 이상 오르면 침체 진입 신호
+SAHM_LEVELS = {"watch": 0.3, "danger": 0.5}
+
+FEAR_GREED_COMPONENTS = {
+    "market_momentum_sp500": "시장 모멘텀 (S&P500 vs 125일선)",
+    "stock_price_strength": "주가 강도 (52주 신고가 vs 신저가)",
+    "stock_price_breadth": "시장 폭 (상승 vs 하락 거래량)",
+    "put_call_options": "풋/콜 옵션 비율",
+    "market_volatility_vix": "변동성 (VIX)",
+    "safe_haven_demand": "안전자산 수요 (주식 vs 채권)",
+    "junk_bond_demand": "정크본드 수요",
 }
 
 MA_WINDOW = 200
