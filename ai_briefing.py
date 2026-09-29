@@ -18,6 +18,8 @@ FAIL_BACKOFF = 600
 # 공개 페이지라 누구나 새로고침(캐시 초기화)할 수 있다. 서버 전체 기준으로
 # Gemini 호출 간격을 강제해 무료 한도가 방문자에 의해 소진되지 않게 한다 (최대 96회/일).
 MIN_CALL_INTERVAL = 900
+# 연속 선물의 하루 등락이 이보다 크면 월물 교체 영향일 수 있다 (대시보드 안내와 같은 기준)
+FUTURES_ROLL_ALERT_PCT = 5.0
 # 일시 장애 때 이전 요약을 대신 보여주는 최대 기간 — 이보다 오래된 요약은 현재 지표와 어긋날 수 있다
 STALE_MAX = 3 * 3600
 
@@ -26,6 +28,7 @@ SYSTEM = """너는 미국 증시 지표를 한국 개인투자자에게 쉽게 �
 - 주어진 JSON 데이터의 숫자만 근거로 쓴다. 데이터에 없는 뉴스, 사건, 원인, 전망은 지어내지 않는다.
 - 매수/매도 추천, 목표가, 향후 가격 예측을 하지 않는다.
 - '대시보드 규칙 판단'과 모순되는 평가를 하지 않는다.
+- '주의' 항목이 붙은 수치는 실제 시장 움직임으로 단정하지 말고, 언급한다면 그 주의 내용을 함께 밝힌다.
 - 한국어 존댓말 평서문(~입니다)으로 쓰고, 전문용어는 처음 나올 때 짧게 풀어쓴다.
 - 과장이나 감탄 없이 담담하고 간결하게, 매번 같은 형식으로 쓴다."""
 
@@ -136,19 +139,27 @@ def build_snapshot() -> dict:
     for name, ticker in config.COMMODITIES_FX.items():
         info = dfetch.fetch_latest_price(ticker)
         if info:
-            commodities[name] = {"가격": round(info["price"], 2), "전일대비_%": round(info["change_pct"], 2)}
+            entry = {"가격": round(info["price"], 2), "전일대비_%": round(info["change_pct"], 2)}
+            if ticker.endswith("=F") and abs(info["change_pct"]) >= FUTURES_ROLL_ALERT_PCT:
+                # 연속 선물은 만기 월물 교체 때 가격이 점프한다 — AI가 실제 급등락으로 해석하지 않게 알린다
+                entry["주의"] = "선물 월물 교체(롤오버) 영향일 수 있어 실제 시장 움직임보다 과장됐을 수 있음"
+            commodities[name] = entry
     snap["원자재·달러·환율"] = commodities
 
     m = dfetch.fetch_macro(fred_key)
     macro = {}
     for key, label in (("t10y2y", "장단기 금리차 10Y-2Y(%p)"), ("t10y3m", "장단기 금리차 10Y-3M(%p)"),
-                       ("fed_funds", "연준 기준금리(%)"), ("unemployment", "실업률(%)"),
+                       ("fed_funds", "실효 연방기금금리 EFFR(%)"), ("unemployment", "실업률(%)"),
                        ("sahm", "삼의 법칙(%p, 0.5 이상이면 침체 신호)")):
         if not m[key].empty:
             macro[label] = round(float(m[key]["value"].iloc[-1]), 2)
+    if not m["fed_upper"].empty and not m["fed_lower"].empty:
+        macro["연준 기준금리 목표 범위(%)"] = (
+            f"{float(m['fed_lower']['value'].iloc[-1]):.2f}-{float(m['fed_upper']['value'].iloc[-1]):.2f}")
     yoy = dfetch.cpi_yoy(m["cpi"])
     if not yoy.empty:
-        macro["CPI 전년비(%)"] = round(float(yoy.iloc[-1]), 2)
+        macro["CPI 전년비(%, 헤드라인)"] = round(float(yoy.iloc[-1]), 2)
+        macro["CPI 기준월"] = yoy.index[-1].strftime("%Y-%m")
     snap["경기·금리곡선"] = macro
     if not m["t10y2y"].empty and not m["t10y3m"].empty and not m["sahm"].empty:
         cs = risk.interpret_yield_curve(m["t10y2y"]["value"], m["t10y3m"]["value"])
@@ -160,14 +171,20 @@ def build_snapshot() -> dict:
     sectors = dfetch.sector_returns((("1개월", 21),))
     if not sectors.empty:
         ranked = sectors.sort_values("1개월", ascending=False)
+        # 받아진 섹터가 적어도 상위·하위 목록이 겹치지 않게 하고, 하위는 가장 부진한 것부터
+        k = min(3, len(ranked) // 2)
+        fmt = lambda r: f"{r['섹터']}({r['티커']}) {r['1개월']:+.1f}%"
         entry = {
-            "1개월 상위": [f"{r['섹터']} {r['1개월']:+.1f}%" for _, r in ranked.head(3).iterrows()],
-            "1개월 하위": [f"{r['섹터']} {r['1개월']:+.1f}%" for _, r in ranked.tail(3).iterrows()],
+            "1개월 상위": [fmt(r) for _, r in ranked.head(k).iterrows()],
+            "1개월 하위(부진한 순)": [fmt(r) for _, r in ranked.tail(k).iloc[::-1].iterrows()],
         }
         if "200일선 대비" in sectors:
             valid = sectors["200일선 대비"].dropna()
             entry["200일선 위 섹터 수"] = f"{int((valid > 0).sum())}/{len(valid)}"
-        snap["섹터(11개 SPDR ETF)"] = entry
+        missing = sectors.attrs.get("missing", [])
+        if missing:
+            entry["데이터 누락 섹터"] = missing
+        snap[f"섹터(SPDR ETF {len(sectors)}개, 배당 조정)"] = entry
 
     if fg and "error" not in fg and fg.get("components"):
         snap["공포탐욕 구성지표(0~100)"] = {
@@ -189,35 +206,48 @@ def _next_threshold(value: float, levels) -> tuple:
 
 
 def _watch_points(snap: dict, y: pd.DataFrame, h: pd.DataFrame, m: dict, limit: int = 4) -> list:
-    # (상대 거리, 설명) — 상대 거리 = 경계까지 남은 폭 / 지표별 '의미 있는 변동폭'
+    # (상대 거리, 설명) — 상대 거리 = 경계까지 남은 폭 / 지표별 '의미 있는 변동폭'.
+    # 이미 위험 경계를 넘은 지표는 거리 0으로 맨 앞에 둔다.
     cands = []
     for name, e in snap.get("3대 지수", {}).items():
         gap = e.get("200일선대비_%")
         if gap is not None:
-            side = "하향 이탈" if gap > 0 else "상향 회복"
-            cands.append((abs(gap) / 5, f"{name}: 200일선 대비 {gap:+.2f}% — 0%가 되면 200일선 {side}"))
+            text = (f"{name}: 200일선 대비 {gap:+.2f}% — 0%가 되면 200일선 하향 이탈" if gap > 0
+                    else f"{name}: 200일선 아래 {gap:+.2f}% — 0%를 넘으면 200일선 회복")
+            cands.append((abs(gap) / 5, text))
     vol = snap.get("변동성 지수", {})
     for name, levels, scale in (("VIX", (15, 20, 30, 40), 5), ("MOVE", (80, 110, 140), 20)):
         if name in vol:
-            lv, dist = _next_threshold(vol[name]["현재"], levels)
-            if lv is not None:
-                cands.append((dist / scale, f"{name}: {vol[name]['현재']:.2f} — 다음 경계선 {lv}까지 {dist:.1f}"))
+            cur = vol[name]["현재"]
+            lv, dist = _next_threshold(cur, levels)
+            if lv is None:
+                cands.append((0, f"{name}: {cur:.2f} — 이미 최고 경계선 {levels[-1]} 초과 (극심한 스트레스)"))
+            else:
+                cands.append((dist / scale, f"{name}: {cur:.2f} — 다음 경계선 {lv}까지 {dist:.1f}"))
     if not h.empty:
         v = float(h["value"].iloc[-1])
         lv, dist = _next_threshold(v, (3.5, 5.0, 7.0))
-        if lv is not None:
+        if lv is None:
+            cands.append((0, f"하이일드 스프레드: {v:.2f}% — 이미 위험 경계 7% 초과"))
+        else:
             cands.append((dist / 0.75, f"하이일드 스프레드: {v:.2f}% — 다음 경계선 {lv}%까지 {dist:.2f}%p"))
     if len(y) >= 6:
         change = (float(y["value"].iloc[-1]) - float(y["value"].iloc[-6])) * 100
-        room = 30 - abs(change)
-        cands.append((max(room, 0) / 15, f"10년물 금리: 5일 변동 {change:+.0f}bp — ±30bp를 넘으면 급변 신호"))
+        if abs(change) >= 30:
+            cands.append((0, f"10년물 금리: 5일 변동 {change:+.0f}bp — 이미 ±30bp 급변 기준 초과"))
+        else:
+            cands.append(((30 - abs(change)) / 15, f"10년물 금리: 5일 변동 {change:+.0f}bp — ±30bp를 넘으면 급변 신호"))
     for key, label in (("t10y2y", "10Y-2Y 금리차"), ("t10y3m", "10Y-3M 금리차")):
         if not m[key].empty:
             v = float(m[key]["value"].iloc[-1])
-            cands.append((abs(v) / 0.5, f"{label}: {v:+.2f}%p — 0 아래로 내려가면 역전"))
+            text = (f"{label}: {v:+.2f}%p — 0 아래로 내려가면 역전" if v >= 0
+                    else f"{label}: {v:+.2f}%p — 이미 역전 상태, 0 위로 올라오면 역전 해소(과거 침체 시작 시점과 자주 겹침)")
+            cands.append((abs(v) / 0.5, text))
     if not m["sahm"].empty:
         v = float(m["sahm"]["value"].iloc[-1])
-        if v < 0.5:
+        if v >= 0.5:
+            cands.append((0, f"삼의 법칙: {v:+.2f}%p — 이미 침체 신호(0.5%p) 발동 상태"))
+        else:
             cands.append(((0.5 - v) / 0.25, f"삼의 법칙: {v:+.2f}%p — 0.5%p에 닿으면 침체 신호"))
     fg = snap.get("CNN 공포탐욕지수(0~100)")
     if fg:

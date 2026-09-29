@@ -1,3 +1,4 @@
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -128,7 +129,7 @@ def _cached_fear_greed() -> dict:
     last_err = "응답 없음"
     for attempt in range(3):
         try:
-            r = requests.get(CNN_URL, headers=CNN_HEADERS, timeout=15)
+            r = requests.get(CNN_URL, headers=CNN_HEADERS, timeout=(3.05, 10))
             r.raise_for_status()
             data = r.json()
             fg = data.get("fear_and_greed") if isinstance(data, dict) else None
@@ -183,7 +184,7 @@ def _cached_fred_series(series_id: str, api_key: str, days: int) -> pd.DataFrame
     last_err = ""
     for attempt in range(3):
         try:
-            r = requests.get(FRED_URL, params=params, timeout=15)
+            r = requests.get(FRED_URL, params=params, timeout=(3.05, 10))
             r.raise_for_status()
             obs = r.json().get("observations", [])
             if obs:
@@ -216,36 +217,70 @@ def fetch_fred_series(series_id: str, api_key: str, days: int = 120) -> pd.DataF
         return pd.DataFrame()
 
 
+class PartialFetch(FetchError):
+    """일부 티커만 받아진 결과 — 캐시하지 않고 잠시만 보여준 뒤 다시 시도한다."""
+
+    def __init__(self, partial: pd.DataFrame, missing: list):
+        super().__init__(f"누락: {', '.join(missing)}")
+        self.partial = partial
+        self.missing = missing
+
+
+def _adjusted(df: pd.DataFrame) -> pd.DataFrame:
+    # 배당락일마다 가짜 하락이 생기지 않게 수익률은 배당 조정 종가로 계산한다
+    col = "Adj Close" if "Adj Close" in df else "Close"
+    out = df[col] if col in df else pd.DataFrame()
+    return out
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _cached_multi_close(tickers: tuple, period: str) -> pd.DataFrame:
-    last_err = ""
-    for attempt in range(3):
-        try:
-            # 섹터 11개를 한 번의 요청으로 받는다 — 티커별로 따로 받으면 콜드 스타트 요청이 몰린다
-            df = yf.download(list(tickers), period=period, auto_adjust=False,
-                             progress=False, threads=False)
-            closes = df["Close"] if "Close" in df else pd.DataFrame()
-            if isinstance(closes, pd.Series):
-                closes = closes.to_frame(tickers[0])
-            closes = closes.dropna(how="all")
-            if not closes.empty:
-                return closes
-        except Exception as e:
-            last_err = str(e)
-        if attempt < 2:
-            time.sleep(0.8 * (attempt + 1))
-    raise FetchError(last_err or "일괄 조회 결과 없음")
+    closes = pd.DataFrame()
+    try:
+        # yf.download 한 번으로 묶어 부른다 (내부적으로는 티커별로 순차 요청)
+        df = yf.download(list(tickers), period=period, auto_adjust=False,
+                         progress=False, threads=False)
+        closes = _adjusted(df)
+        if isinstance(closes, pd.Series):
+            closes = closes.to_frame(tickers[0])
+    except Exception:
+        closes = pd.DataFrame()
+
+    # yf.download는 일부 티커가 실패해도 예외 없이 빈 열만 남긴다 — 빠진 티커는 개별로 다시 받는다
+    missing = [t for t in tickers if t not in closes or not closes[t].notna().any()]
+    for t in missing:
+        one = _fetch_history_with_retry(t, period)
+        if not one.empty:
+            series = _adjusted(one)
+            series.index = series.index.tz_localize(None) if series.index.tz is not None else series.index
+            closes = closes.join(series.rename(t), how="outer") if not closes.empty else series.to_frame(t)
+    closes = closes.dropna(how="all")
+    missing = [t for t in tickers if t not in closes or not closes[t].notna().any()]
+    if closes.empty:
+        raise FetchError("일괄 조회 결과 없음")
+    if missing:
+        raise PartialFetch(closes, missing)
+    return closes
+
+
+_partial_memo: dict = {}
 
 
 def fetch_multi_close(tickers: tuple, period: str = "1y") -> pd.DataFrame:
-    """여러 티커의 종가를 열(column)=티커 형태로 돌려준다. 실패하면 빈 DataFrame."""
+    """여러 티커의 종가(배당 조정)를 열(column)=티커 형태로 돌려준다. 실패하면 빈 DataFrame.
+    일부만 받아졌으면 그 부분을 돌려주되 캐시하지 않아 2분 뒤 다시 시도한다."""
     key = ("multi", tickers, period)
     if _failed_recently(key):
-        return pd.DataFrame()
+        return _partial_memo.get(key, pd.DataFrame())
     try:
         return _cached_multi_close(tickers, period)
+    except PartialFetch as e:
+        _mark_failed(key)
+        _partial_memo[key] = e.partial
+        return e.partial
     except Exception:
         _mark_failed(key)
+        _partial_memo.pop(key, None)
         return pd.DataFrame()
 
 
@@ -259,47 +294,98 @@ def now_kst_str() -> str:
 
 
 def fetch_macro(fred_key: str) -> dict:
-    """경기·금리 곡선 지표. 대시보드와 AI 브리핑이 같은 캐시를 공유한다."""
+    """경기·금리 곡선 지표. 대시보드와 AI 브리핑이 같은 캐시를 공유한다.
+
+    FRED 8개 계열을 순서대로 받으면 콜드 스타트가 수십 초로 늘어나 병렬로 받는다.
+    """
     fs = config.FRED_SERIES
-    return {
-        # 금리차는 '최근 1년 내 역전 여부'까지 보려고 길게 받는다
-        "t10y2y": fetch_fred_series(fs["t10y2y"], fred_key, days=400),
-        "t10y3m": fetch_fred_series(fs["t10y3m"], fred_key, days=400),
-        "fed_funds": fetch_fred_series(fs["fed_funds"], fred_key),
-        "cpi": fetch_fred_series(fs["cpi"], fred_key, days=30),
-        "unemployment": fetch_fred_series(fs["unemployment"], fred_key, days=30),
-        "sahm": fetch_fred_series(fs["sahm"], fred_key, days=30),
+    # 금리차는 '최근 1년 내 역전 여부'까지 보려고 길게 받는다
+    plan = {
+        "t10y2y": (fs["t10y2y"], 400),
+        "t10y3m": (fs["t10y3m"], 400),
+        "fed_funds": (fs["fed_funds"], 120),
+        "fed_upper": (fs["fed_target_upper"], 120),
+        "fed_lower": (fs["fed_target_lower"], 120),
+        "cpi": (fs["cpi"], 30),
+        "unemployment": (fs["unemployment"], 30),
+        "sahm": (fs["sahm"], 30),
     }
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        ctx = get_script_run_ctx()
+
+        def run(item):
+            name, (sid, days) = item
+            if ctx is not None:
+                add_script_run_ctx(threading.current_thread(), ctx)
+            return name, fetch_fred_series(sid, fred_key, days=days)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            return dict(pool.map(run, plan.items()))
+    except Exception:
+        return {name: fetch_fred_series(sid, fred_key, days=days) for name, (sid, days) in plan.items()}
 
 
 def cpi_yoy(cpi_df: pd.DataFrame) -> pd.Series:
-    """월별 CPI 지수 → 전년 동월 대비 상승률(%) 시계열."""
+    """월별 CPI 지수 → 전년 동월 대비 상승률(%) 시계열.
+
+    발표가 빠진 달(예: 2025년 10월 셧다운)이 있어도 12개월 전과 비교하도록 날짜로 맞춘다.
+    행 기준으로 12칸 밀면 빠진 달 이후로는 13개월 전과 비교하게 된다.
+    """
     if cpi_df.empty:
         return pd.Series(dtype=float)
-    s = cpi_df.set_index("date")["value"]
+    s = cpi_df.set_index("date")["value"].asfreq("MS")
     return ((s / s.shift(12) - 1) * 100).dropna()
 
 
+def value_months_ago(series: pd.Series, dates: pd.Series, months: int = 1):
+    """날짜 기준으로 N개월 전(또는 그 직전) 값. 없으면 None."""
+    s = pd.Series(series.values, index=pd.to_datetime(dates.values)).dropna().sort_index()
+    if s.empty:
+        return None
+    target = s.index[-1] - pd.DateOffset(months=months)
+    if target < s.index[0]:
+        return None
+    return float(s.asof(target))
+
+
 def sector_returns(periods) -> pd.DataFrame:
-    """섹터 ETF별 기간 수익률(%)과 200일선 대비(%). periods = ((라벨, 거래일 수), ...)"""
+    """섹터 ETF별 기간 수익률(%)과 200일선 대비(%). periods = ((라벨, 거래일 수), ...)
+    받지 못한 섹터는 결과의 attrs["missing"]에 이름으로 남긴다."""
     tickers = tuple(config.SECTOR_ETFS.values())
-    closes = fetch_multi_close(tickers, period="1y")
-    if closes.empty:
-        return pd.DataFrame()
     names = {t: n for n, t in config.SECTOR_ETFS.items()}
+    closes = fetch_multi_close(tickers, period="1y")
     longest = max(n for _, n in periods)
     rows = []
     for t in tickers:
-        if t not in closes:
+        if closes.empty or t not in closes:
             continue
         s = closes[t].dropna()
         if len(s) <= longest:
             continue
-        row = {"섹터": f"{names[t]} ({t})"}
+        row = {"섹터": names[t], "티커": t}
         for label, n in periods:
             row[label] = (float(s.iloc[-1]) / float(s.iloc[-1 - n]) - 1) * 100
         if len(s) >= config.MA_WINDOW:
             ma = float(s.rolling(config.MA_WINDOW).mean().iloc[-1])
             row["200일선 대비"] = (float(s.iloc[-1]) / ma - 1) * 100
         rows.append(row)
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    loaded = set(out["티커"]) if not out.empty else set()
+    out.attrs["missing"] = [names[t] for t in tickers if t not in loaded]
+    return out
+
+
+_refresh = {"ts": 0.0}
+_refresh_lock = threading.Lock()
+
+
+def try_global_refresh(cooldown: float) -> bool:
+    """모든 방문자를 통틀어 cooldown초에 한 번만 전체 캐시 초기화를 허용한다."""
+    with _refresh_lock:
+        now = time.time()
+        if now - _refresh["ts"] < cooldown:
+            return False
+        _refresh["ts"] = now
+        return True

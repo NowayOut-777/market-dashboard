@@ -77,7 +77,7 @@ def interpret_hy_spread(series: pd.Series) -> Signal:
     elif latest > config.HY_SPREAD_LEVELS["warning"]:
         level = "watch"
         headline = f"{latest:.2f}% — 신용 우려 확산"
-        detail = "5~7%는 시장이 신용 리스크를 본격적으로 반영하기 시작하는 구간입니다."
+        detail = "5–7%는 시장이 신용 리스크를 본격적으로 반영하기 시작하는 구간입니다."
     elif latest > config.HY_SPREAD_LEVELS["safe"]:
         level = "neutral"
         headline = f"{latest:.2f}% — 중립"
@@ -100,7 +100,7 @@ def interpret_vix(latest: float) -> Signal:
                       "변동성이 매우 낮은 구간. 시장이 안일(complacency)할 수 있어 역설적으로 변곡점 주의.")
     if latest < config.VIX_LEVELS["warning"]:
         return Signal("neutral", _icon("neutral"), f"{latest:.2f} — 정상",
-                      "장기 평균(약 19~20) 부근의 정상적인 변동성 수준입니다.")
+                      "장기 평균(약 19–20) 부근의 정상적인 변동성 수준입니다.")
     if latest < config.VIX_LEVELS["danger"]:
         return Signal("watch", _icon("watch"), f"{latest:.2f} — 경계",
                       "투자자들이 헤지 비용을 높게 지불하기 시작한 구간. 우려가 형성되는 단계.")
@@ -157,6 +157,10 @@ def combine(yield_sig: Signal, hy_sig: Signal,
     return Signal(worst, _icon(worst), headlines[worst], "10년물과 HY 스프레드 신호를 종합한 결과입니다.")
 
 
+CURVE_CAVEAT = ("과거 미국 경기침체에 약 6–24개월 앞서 나타났지만, 2022–2024년의 역대 최장 역전 뒤에는 "
+                "침체가 오지 않아 시점을 맞히는 도구로는 한계가 있습니다.")
+
+
 def interpret_yield_curve(t10y2y: pd.Series, t10y3m: pd.Series) -> Signal:
     s2, s3 = t10y2y.dropna(), t10y3m.dropna()
     if s2.empty or s3.empty:
@@ -166,20 +170,25 @@ def interpret_yield_curve(t10y2y: pd.Series, t10y3m: pd.Series) -> Signal:
 
     if now2 < 0 and now3 < 0:
         return Signal("watch", _icon("watch"), f"장단기 금리 역전 ({values})",
-                      "단기 금리가 장기 금리보다 높은 상태입니다. 1970년 이후 대부분의 미국 경기침체에 "
-                      "6~18개월 앞서 나타난 신호라 경기 둔화 가능성을 경계할 구간입니다.")
+                      "단기 금리가 장기 금리보다 높은 상태입니다. " + CURVE_CAVEAT)
     if now2 < 0 or now3 < 0:
-        return Signal("watch", _icon("watch"), f"부분 역전 ({values})",
-                      "두 금리차 중 하나가 역전돼 있습니다. 특히 10Y-3M은 뉴욕 연은 침체 확률 모델이 쓰는 지표입니다.")
+        leg = "10Y-2Y" if now2 < 0 else "10Y-3M"
+        note = " 10Y-3M은 뉴욕 연은 침체 확률 모델이 쓰는 지표입니다." if leg == "10Y-3M" else ""
+        return Signal("watch", _icon("watch"), f"{leg}만 역전 ({values})",
+                      f"두 금리차 중 {leg}만 음수입니다.{note} " + CURVE_CAVEAT)
 
-    # 1년 안에 한 달 이상 역전됐다가 풀렸다면, 과거 침체는 이 '역전 해소' 전후에 시작된 경우가 많았다
-    recent3 = s3.tail(config.YIELD_CURVE_LOOKBACK_DAYS)
-    if int((recent3 < 0).sum()) >= 20:
+    # 최근 1년 안에 한 달(20거래일) 이상 역전됐다가 풀렸다면, 과거 침체는 이 정상화 시점 전후에 시작된 경우가 많았다
+    lookback = config.YIELD_CURVE_LOOKBACK_DAYS
+    recently = [name for name, s in (("10Y-2Y", s2), ("10Y-3M", s3)) if int((s.tail(lookback) < 0).sum()) >= 20]
+    if recently:
         return Signal("watch", _icon("watch"), f"역전 해소 직후 ({values})",
-                      "최근 1년 안에 역전됐던 금리차가 다시 양수로 돌아왔습니다. 과거 경기침체는 역전 자체보다 "
-                      "이 정상화 시점 전후에 시작된 경우가 많아 주의가 필요합니다.")
+                      f"최근 1년 안에 {'·'.join(recently)} 금리차가 한 달 이상 역전됐다가 다시 양수로 돌아왔습니다. "
+                      "과거 경기침체는 역전 자체보다 이 정상화 시점 전후에 시작된 경우가 많아 주의가 필요합니다.")
     return Signal("safe", _icon("safe"), f"정상 — 우상향 곡선 ({values})",
                   "장기 금리가 단기 금리보다 높은 정상적인 모양입니다. 채권시장이 경기 침체를 가격에 반영하지 않고 있습니다.")
+
+
+SAHM_DEFINITION = "실업률 3개월 평균이 직전 12개월 동안의 3개월 평균 최저치보다 얼마나 올랐는지"
 
 
 def interpret_sahm(series: pd.Series) -> Signal:
@@ -189,13 +198,13 @@ def interpret_sahm(series: pd.Series) -> Signal:
     v = float(s.iloc[-1])
     if v >= config.SAHM_LEVELS["danger"]:
         return Signal("danger", _icon("danger"), f"{v:.2f}%p — 침체 신호 발동",
-                      "실업률 3개월 평균이 직전 12개월 최저치보다 0.5%p 이상 올랐습니다. "
-                      "1970년 이후 이 신호는 거의 모든 미국 경기침체 초기에 나타났습니다.")
+                      f"{SAHM_DEFINITION}가 0.5%p를 넘었습니다. 1970년 이후 거의 모든 미국 경기침체 초기에 나타난 "
+                      "신호지만, 2024년 7–9월에는 침체 없이 발동한 적이 있어 다른 지표와 함께 봐야 합니다.")
     if v >= config.SAHM_LEVELS["watch"]:
         return Signal("watch", _icon("watch"), f"{v:.2f}%p — 상승 중",
-                      "실업률이 빠르게 오르고 있습니다. 0.5%p에 닿으면 경기침체 신호로 봅니다.")
+                      f"{SAHM_DEFINITION}가 커지고 있습니다. 0.5%p에 닿으면 경기침체 신호로 봅니다.")
     return Signal("safe", _icon("safe"), f"{v:.2f}%p — 안정",
-                  "실업률 급등 신호가 없습니다 (0.5%p 이상이면 침체 신호).")
+                  f"실업률 급등 신호가 없습니다 ({SAHM_DEFINITION}; 0.5%p 이상이면 침체 신호).")
 
 
 def combine_cycle(curve_sig: Signal, sahm_sig: Signal) -> Signal:

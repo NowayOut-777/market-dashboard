@@ -176,8 +176,11 @@ FRED_SERIES = {
     "hy_spread": "BAMLH0A0HYM2",
     "t10y2y": "T10Y2Y",        # 10년물 - 2년물 금리차 (일별)
     "t10y3m": "T10Y3M",        # 10년물 - 3개월물 금리차 (일별)
-    "fed_funds": "DFF",        # 실효 연방기금금리 (일별)
-    "cpi": "CPIAUCSL",         # 소비자물가지수 (월별, 전년비 계산)
+    "fed_funds": "DFF",        # 실효 연방기금금리 EFFR (일별)
+    "fed_target_upper": "DFEDTARU",  # 연준 기준금리 목표 범위 상단
+    "fed_target_lower": "DFEDTARL",  # 연준 기준금리 목표 범위 하단
+    # 뉴스 헤드라인(BLS 12개월 상승률)은 계절조정 전 지수 기준이라 CPIAUCNS를 쓴다
+    "cpi": "CPIAUCNS",         # 소비자물가지수 (월별, 전년비 계산)
     "unemployment": "UNRATE",  # 실업률 (월별)
     "sahm": "SAHMREALTIME",    # 삼의 법칙 경기침체 지표 (월별)
 }

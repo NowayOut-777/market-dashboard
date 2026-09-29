@@ -242,12 +242,13 @@ def render_theme_css():
             margin: 1.6rem 0 !important;
         }
 
+        /* 여백(padding)을 주면 Plotly가 넓이를 잘못 재서 오른쪽이 잘린다 — 여백은 차트 margin으로 준다 */
         div[data-testid="stPlotlyChart"] {
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 12px;
             box-shadow: var(--shadow-1);
+            overflow: hidden;
         }
 
         [data-baseweb="tab-list"] {
@@ -546,6 +547,16 @@ def commodity_metric(name: str, ticker: str):
         delta=f"{info['change_pct']:+.2f}%",
     )
     st.caption(f"기준일: {info['as_of']}")
+    if is_possible_futures_roll(ticker, info["change_pct"]):
+        st.caption("⚠️ 선물 월물 교체(롤오버) 시기엔 등락률이 과장될 수 있습니다")
+
+
+FUTURES_ROLL_ALERT_PCT = 5.0
+
+
+def is_possible_futures_roll(ticker: str, change_pct: float) -> bool:
+    # 연속 선물(=F)은 만기 때 다음 월물로 바뀌며 가격이 점프해, 실제 시장 움직임보다 큰 등락이 찍힐 수 있다
+    return ticker.endswith("=F") and abs(change_pct) >= FUTURES_ROLL_ALERT_PCT
 
 
 def fred_caption(api_key: str) -> str:
@@ -574,13 +585,12 @@ def render_header():
             st.rerun()
     with hcol3:
         if st.button("🔄 새로고침"):
-            now = time.time()
-            if now - st.session_state.get("last_refresh_ts", 0) < REFRESH_COOLDOWN:
-                st.toast("방금 갱신했습니다 — 2분 후 다시 시도해 주세요.")
-            else:
-                st.session_state.last_refresh_ts = now
+            # 캐시는 모든 방문자가 공유하므로 쿨다운도 방문자 전체 기준으로 건다
+            if dfetch.try_global_refresh(REFRESH_COOLDOWN):
                 st.cache_data.clear()
                 st.rerun()
+            else:
+                st.toast("방금 갱신됐습니다 — 2분 후 다시 시도해 주세요.")
 
 
 # =========================
@@ -618,7 +628,7 @@ def render_section_fear_greed():
                 st.markdown(f"- 1개월 전: `{float(fg['previous_1_month']):.1f}`")
             if fg.get("previous_1_year") is not None:
                 st.markdown(f"- 1년 전: `{float(fg['previous_1_year']):.1f}`")
-            st.caption("0~25 극단적 공포 / 25~45 공포 / 45~55 중립 / 55~75 탐욕 / 75~100 극단적 탐욕")
+            st.caption("0–25 극단적 공포 / 25–45 공포 / 45–55 중립 / 55–75 탐욕 / 75–100 극단적 탐욕")
         comps = fg.get("components") or {}
         if comps:
             st.markdown("**구성 지표 7개** — 공포탐욕지수는 아래 지표를 평균한 값입니다 (0 극단적 공포 ↔ 100 극단적 탐욕)")
@@ -710,22 +720,47 @@ def render_section_bonds():
 # =========================
 # 5. Macro & Yield Curve
 # =========================
-def macro_metric(label: str, series: pd.Series, dates: pd.Series, unit: str, fred_key: str,
+def format_delta(change: float, unit: str) -> tuple:
+    """(델타 문자열, 변화 없음 여부). 0을 '+0.00'으로 쓰면 streamlit이 상승 화살표를 그린다."""
+    text = f"{change:+.0f}{unit}" if unit == "bp" else f"{change:+.2f}{unit}"
+    flat = (round(change) == 0) if unit == "bp" else (round(change, 2) == 0)
+    return ("0" + unit if unit == "bp" else "0.00" + unit) if flat else text, flat
+
+
+def macro_metric(label: str, df: pd.DataFrame, unit: str, fred_key: str,
                  delta_scale: float = 100, delta_unit: str = "bp", delta_color: str = "off",
-                 lag: int = 1, note: str = ""):
-    s = series.dropna()
-    if s.empty:
+                 note: str = ""):
+    """df: date/value 열. 변화량은 행 개수가 아니라 날짜 기준 1개월 전 값과 비교한다
+    (일별 계열은 주말 행이 섞여 있고, 월별 계열은 발표가 빠진 달이 있다)."""
+    if df.empty or df["value"].dropna().empty:
         st.metric(label, "데이터 없음")
         st.caption(fred_caption(fred_key))
         return
-    last = float(s.iloc[-1])
-    delta = None
-    if len(s) > lag:
-        change = (last - float(s.iloc[-1 - lag])) * delta_scale
-        delta = f"{change:+.0f}{delta_unit}" if delta_unit == "bp" else f"{change:+.2f}{delta_unit}"
+    last = float(df["value"].dropna().iloc[-1])
+    prev = dfetch.value_months_ago(df["value"], df["date"], months=1)
+    delta, flat = (None, False)
+    if prev is not None:
+        delta, flat = format_delta((last - prev) * delta_scale, delta_unit)
     st.metric(label, f"{last:+.2f}{unit}" if unit == "%p" else f"{last:.2f}{unit}",
-              delta=delta, delta_color=delta_color)
-    st.caption(" · ".join(x for x in (f"기준일: {pd.Timestamp(dates.iloc[-1]).strftime('%Y-%m-%d')}", note) if x))
+              delta=delta, delta_color="off" if flat else delta_color)
+    st.caption(" · ".join(x for x in (f"기준일: {pd.Timestamp(df['date'].iloc[-1]).strftime('%Y-%m-%d')}", note) if x))
+
+
+def fed_target_metric(m: dict, fred_key: str):
+    up, lo, eff = m["fed_upper"], m["fed_lower"], m["fed_funds"]
+    if up.empty or lo.empty:
+        macro_metric("실효 연방기금금리 (EFFR)", eff, "%", fred_key, note="1개월 변화")
+        return
+    upper, lower = float(up["value"].iloc[-1]), float(lo["value"].iloc[-1])
+    prev = dfetch.value_months_ago(up["value"], up["date"], months=1)
+    delta, flat = (None, False)
+    if prev is not None:
+        delta, flat = format_delta((upper - prev) * 100, "bp")
+    st.metric("연준 기준금리 (목표 범위)", f"{lower:.2f}–{upper:.2f}%", delta=delta, delta_color="off")
+    parts = [f"기준일: {pd.Timestamp(up['date'].iloc[-1]).strftime('%Y-%m-%d')}", "1개월 변화"]
+    if not eff.empty:
+        parts.append(f"실효금리 {float(eff['value'].iloc[-1]):.2f}%")
+    st.caption(" · ".join(parts))
 
 
 def render_section_macro():
@@ -735,33 +770,24 @@ def render_section_macro():
 
     row1 = st.columns(3)
     with row1[0]:
-        df = m["t10y2y"]
-        macro_metric("장단기 금리차 10Y-2Y", df["value"] if not df.empty else pd.Series(dtype=float),
-                     df["date"] if not df.empty else None, "%p", fred_key, lag=21, note="1개월 변화 · 음수=역전")
+        macro_metric("장단기 금리차 10Y-2Y", m["t10y2y"], "%p", fred_key, note="1개월 변화 · 음수=역전")
     with row1[1]:
-        df = m["t10y3m"]
-        macro_metric("장단기 금리차 10Y-3M", df["value"] if not df.empty else pd.Series(dtype=float),
-                     df["date"] if not df.empty else None, "%p", fred_key, lag=21, note="1개월 변화 · 음수=역전")
+        macro_metric("장단기 금리차 10Y-3M", m["t10y3m"], "%p", fred_key, note="1개월 변화 · 음수=역전")
     with row1[2]:
-        df = m["fed_funds"]
-        macro_metric("연준 기준금리 (실효)", df["value"] if not df.empty else pd.Series(dtype=float),
-                     df["date"] if not df.empty else None, "%", fred_key, lag=21, note="1개월 변화")
+        fed_target_metric(m, fred_key)
 
     row2 = st.columns(3)
     with row2[0]:
-        yoy = dfetch.cpi_yoy(m["cpi"]) if len(m["cpi"]) > 13 else pd.Series(dtype=float)
-        macro_metric("소비자물가 CPI (전년비)", yoy, pd.Series(yoy.index) if not yoy.empty else None, "%",
-                     fred_key, delta_scale=1, delta_unit="%p", delta_color="inverse", note="전월 대비 변화")
+        yoy = dfetch.cpi_yoy(m["cpi"])
+        yoy_df = pd.DataFrame({"date": yoy.index, "value": yoy.values})
+        macro_metric("소비자물가 CPI (전년비)", yoy_df, "%", fred_key, delta_scale=1, delta_unit="%p",
+                     delta_color="inverse", note="전월 대비 상승률 변화")
     with row2[1]:
-        df = m["unemployment"]
-        macro_metric("실업률", df["value"] if not df.empty else pd.Series(dtype=float),
-                     df["date"] if not df.empty else None, "%", fred_key,
-                     delta_scale=1, delta_unit="%p", delta_color="inverse", note="전월 대비 변화")
+        macro_metric("실업률", m["unemployment"], "%", fred_key, delta_scale=1, delta_unit="%p",
+                     delta_color="inverse", note="전월 대비 변화")
     with row2[2]:
-        df = m["sahm"]
-        macro_metric("삼의 법칙 (침체 지표)", df["value"] if not df.empty else pd.Series(dtype=float),
-                     df["date"] if not df.empty else None, "%p", fred_key,
-                     delta_scale=1, delta_unit="%p", delta_color="inverse", note="0.5%p 이상이면 침체 신호")
+        macro_metric("삼의 법칙 (침체 지표)", m["sahm"], "%p", fred_key, delta_scale=1, delta_unit="%p",
+                     delta_color="inverse", note="0.5%p 이상이면 침체 신호")
 
     s2, s3 = m["t10y2y"], m["t10y3m"]
     if not s2.empty or not s3.empty:
@@ -780,7 +806,9 @@ def render_section_macro():
         )
         st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
     st.caption("장단기 금리차가 음수(역전)가 되면 채권시장이 경기 둔화를 예상한다는 뜻으로, 과거 미국 경기침체에 "
-               "6~18개월 앞서 나타났습니다. 삼의 법칙은 실업률이 빠르게 오를 때 켜지는 침체 초기 신호입니다.")
+               "약 6–24개월 앞서 나타났습니다(2022–2024년 역전 뒤엔 침체가 오지 않은 예외도 있음). "
+               "삼의 법칙은 실업률이 빠르게 오를 때 켜지는 침체 초기 신호입니다. "
+               "CPI는 뉴스 헤드라인과 같은 계절조정 전 지수 기준입니다.")
 
 
 # =========================
@@ -865,8 +893,8 @@ def render_section_risk():
 
 **하이일드 스프레드 (절대 수준 기준, FRED BAMLH0A0HYM2)**
 - 🟢 < 3.5%: 위험선호 강함, 시장 안정
-- 🟡 3.5~5%: 정상 범위 (장기 평균 부근)
-- 🟠 5~7%: 신용 우려 확산
+- 🟡 3.5–5%: 정상 범위 (장기 평균 부근)
+- 🟠 5–7%: 신용 우려 확산
 - 🔴 > 7%: 신용 경색·침체 신호 (2008·2020 수준)
 - 🔴 5일간 +50bp 이상 급확대: 조기경보 (주식 하락 선행지표)
 
@@ -876,25 +904,25 @@ def render_section_risk():
 
 **VIX (S&P 500 옵션 내재변동성, 절대 수준)**
 - 🟢 < 15: 매우 낮음 (안일 — 역설적으로 변곡점 주의)
-- 🟡 15~20: 정상 (장기 평균 부근)
-- 🟠 20~30: 경계 (헤지 비용 상승, 우려 형성)
-- 🔴 30~40: 공포
+- 🟡 15–20: 정상 (장기 평균 부근)
+- 🟠 20–30: 경계 (헤지 비용 상승, 우려 형성)
+- 🔴 30–40: 공포
 - 🔴 40+: 패닉 (2008·2020 위기 수준)
 
 **MOVE (미 국채 옵션 내재변동성, 절대 수준)**
 - 🟢 < 80: 채권시장 안정
-- 🟡 80~110: 정상
-- 🟠 110~140: 경계 (통화정책 불확실성·인플레이션 우려)
-- 🔴 140+: 채권시장 스트레스 (2022~2023 SVB 사태급)
+- 🟡 80–110: 정상
+- 🟠 110–140: 경계 (통화정책 불확실성·인플레이션 우려)
+- 🔴 140+: 채권시장 스트레스 (2022–2023 SVB 사태급)
 
 **장단기 금리차 (10Y-2Y, 10Y-3M)**
 - 🟢 둘 다 양수: 정상 (우상향 곡선)
-- 🟠 하나라도 음수: 역전 — 과거 침체에 6~18개월 선행
-- 🟠 최근 1년 내 한 달 이상 역전됐다가 양수로 복귀: 역전 해소 직후 — 과거 침체가 자주 시작된 시점
+- 🟠 하나라도 음수: 역전 — 과거 침체에 약 6–24개월 선행 (2022–2024년 역전 뒤엔 침체 없음)
+- 🟠 둘 중 하나라도 최근 1년 내 한 달 이상 역전됐다가 양수로 복귀: 역전 해소 직후 — 과거 침체가 자주 시작된 시점
 
-**삼의 법칙 (실업률 3개월 평균 − 직전 12개월 최저)**
+**삼의 법칙 (실업률 3개월 평균 − 직전 12개월 동안의 3개월 평균 최저치)**
 - 🟢 < 0.3%p: 안정
-- 🟠 0.3~0.5%p: 상승 중
+- 🟠 0.3–0.5%p: 상승 중
 - 🔴 ≥ 0.5%p: 침체 신호 발동
 """)
 
@@ -911,6 +939,7 @@ def render_section_sectors():
     if df.empty:
         st.warning("섹터 데이터를 불러오지 못했습니다 — 잠시 후 새로고침해 주세요.")
         return
+    missing = df.attrs.get("missing", [])
     df = df.sort_values("1개월", ascending=False).reset_index(drop=True)
 
     has_ma = "200일선 대비" in df and df["200일선 대비"].notna().any()
@@ -927,32 +956,46 @@ def render_section_sectors():
                        else "🔴 약세가 넓게 퍼짐")
     with kcols[1]:
         top = df.iloc[0]
-        st.metric("1개월 주도 섹터", top["섹터"].split(" (")[0], delta=f"{top['1개월']:+.2f}%")
+        st.metric("1개월 주도 섹터", top["섹터"], delta=f"{top['1개월']:+.2f}%")
     with kcols[2]:
         bottom = df.iloc[-1]
-        st.metric("1개월 부진 섹터", bottom["섹터"].split(" (")[0], delta=f"{bottom['1개월']:+.2f}%")
+        st.metric("1개월 부진 섹터", bottom["섹터"], delta=f"{bottom['1개월']:+.2f}%")
+    if missing:
+        st.caption(f"⚠️ 일부 섹터 데이터를 받지 못했습니다: {', '.join(missing)} — 잠시 후 자동으로 다시 시도합니다")
 
-    cols = [label for label, _ in SECTOR_PERIODS] + (["200일선 대비"] if has_ma else [])
+    periods = [label for label, _ in SECTOR_PERIODS]
+    cols = periods + (["200일선 대비"] if has_ma else [])
     values = df[cols]
     # 기간마다 수익률 크기가 달라(1일 ±1%, 3개월 ±15%) 색은 열별로 정규화하고 글자는 실제 값을 보여준다
     scale = values.abs().max().replace(0, 1)
     z = (values / scale).fillna(0).values
-    text = values.apply(lambda col: col.map(lambda v: "" if pd.isna(v) else f"{v:+.1f}%")).values
-    neutral = "#1f2630" if st.session_state.dark_mode else "#f3f5f8"
+    # 폭이 좁은 휴대폰에서도 칸 안에 들어가도록 큰 값(3개월·200일선)은 정수로 쓴다
+    wide = {"3개월", "200일선 대비"}
+    text = values.apply(lambda col: col.map(
+        lambda v: "" if pd.isna(v) else (f"{v:+.0f}%" if col.name in wide else f"{v:+.1f}%"))).values
+    is_dark = st.session_state.dark_mode
+    if is_dark:
+        colorscale = [[0, "#d12d3a"], [0.5, "#1f2630"], [1, "#1a8d4a"]]
+        text_color = "#f3f5f8"
+    else:
+        # 라이트 모드는 중간 진하기 칸에서도 글자가 읽히도록 끝 색을 옅게 한다
+        colorscale = [[0, "#f19aa2"], [0.5, "#f3f5f8"], [1, "#8fd0a8"]]
+        text_color = "#0e131c"
     fig = go.Figure(go.Heatmap(
-        z=z, x=cols, y=df["섹터"], text=text, texttemplate="%{text}",
-        textfont=dict(family="JetBrains Mono", size=12),
-        colorscale=[[0, "#d12d3a"], [0.5, neutral], [1, "#1a8d4a"]], zmin=-1, zmax=1,
+        z=z, x=[c.replace(" 대비", "") for c in cols], y=df["섹터"], text=text, texttemplate="%{text}",
+        textfont=dict(family="JetBrains Mono", size=11, color=text_color),
+        colorscale=colorscale, zmin=-1, zmax=1,
         showscale=False, hoverinfo="skip", xgap=3, ygap=3,
     ))
     fig.update_layout(
         **plotly_layout(),
-        height=40 * len(df) + 60, margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(side="top", showgrid=False),
-        yaxis=dict(autorange="reversed", showgrid=False),
+        height=36 * len(df) + 60, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(side="top", showgrid=False, fixedrange=True),
+        yaxis=dict(autorange="reversed", showgrid=False, fixedrange=True),
     )
-    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
-    st.caption("1개월 수익률 순으로 정렬 · 색 진하기는 같은 열 안에서 비교한 상대 강도 · 섹터 ETF(SPDR) 기준")
+    st.plotly_chart(fig, use_container_width=True, config={**PLOT_CONFIG, "staticPlot": True})
+    st.caption("1개월 수익률 순으로 정렬 · 색 진하기는 같은 열 안에서 비교한 상대 강도 · "
+               "섹터 ETF(SPDR) 배당 조정 종가 기준")
 
 
 # =========================
