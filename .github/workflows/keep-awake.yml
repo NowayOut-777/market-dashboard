@@ -2,14 +2,18 @@ name: Keep App Awake
 
 on:
   schedule:
-    # 6시간마다 (UTC 00:23/06:23/12:23/18:23 = 한국시간 09:23/15:23/21:23/03:23)
-    # Community Cloud는 약 12시간 무방문 시 앱을 재우므로, GitHub 예약 지연(최대 1~2시간)을 감안해도 여유가 있다
-    - cron: "23 */6 * * *"
+    # 매시 17분. 6시간 간격일 때 방문 후 8시간이 안 돼 잠든 적이 있어 1시간마다 확인한다
+    # (공개 저장소라 Actions 사용량은 무료)
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   actions: write
   contents: read
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: false
 
 jobs:
   visit:
@@ -22,10 +26,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install headless browser
-        run: |
-          pip install --quiet playwright
-          python -m playwright install --with-deps chromium
+      - name: Install playwright
+        run: pip install --quiet playwright
+
+      # 크롬(약 150MB)을 매번 내려받지 않도록 캐시한다 — 키는 playwright 버전별
+      - name: Resolve playwright version
+        id: pw
+        run: echo "version=$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache browser
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ steps.pw.outputs.version }}
+
+      - name: Install browser
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install browser system deps
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
 
       - name: Visit dashboard (wake up if sleeping)
         run: python scripts/keep_awake.py
